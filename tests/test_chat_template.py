@@ -107,6 +107,20 @@ CASES = [
 ]
 
 
+# The `namespace` tool extension (reference encoding.py commit dba1be0) is deliberately NOT
+# ported into the template. It is kept out of CASES (which assert byte-for-byte parity) because
+# the template is expected to reject it, not match the reference. See check_namespace_deferral.
+NAMESPACE_CASE = dict(
+    messages = [{"role": "system", "content": "You may use tools."},
+                {"role": "user", "content": "Search it"}],
+    tools = [{"type": "function",
+              "namespace": {"name": "search", "description": "Search tools."},
+              "function": {"name": "lookup", "description": "Look up a value",
+                           "parameters": {"type": "object",
+                                          "properties": {"query": {"type": "string"}}}}}],
+)
+
+
 def reference_render(enc, case):
     """encode_messages with the same defaults the template targets."""
     msgs = json.loads(json.dumps(case["messages"]))
@@ -123,6 +137,31 @@ def reference_render(enc, case):
         thinking_mode = "thinking" if case.get("enable_thinking", True) else "chat",
         **kwargs,
     )
+
+
+def check_namespace_deferral(enc, template):
+    """Durable guard for the deliberate non-adoption of the `namespace` tool extension
+    (reference encoding.py commit dba1be0). Upstream qualifies tool names as `namespace::name`
+    and folds namespace.description into the description; this template does neither and must
+    fail closed instead of silently diverging. Returns True if the deferral still holds.
+    If this ever starts passing silently, someone dropped the guard without porting dba1be0."""
+    try:
+        template.render(messages = NAMESPACE_CASE["messages"], tools = NAMESPACE_CASE["tools"],
+                        add_generation_prompt = True)
+    except Exception as e:
+        print(f"[OK]   template fails closed on namespaced tools ({type(e).__name__})")
+        ok = True
+    else:
+        print("[FAIL] template rendered a namespaced tool silently -- guard missing; "
+              "port encoding.py dba1be0 into template AND output parser, or restore the guard")
+        ok = False
+    # Best-effort: record whether the pinned reference checkout even carries the feature.
+    if getattr(enc, "_tool_name_for_encoding", None) is not None:
+        print("[INFO] reference checkout has tool namespaces (>= dba1be0); a port must emit "
+              "`namespace::name` and prepend namespace.description")
+    else:
+        print("[INFO] reference checkout predates tool namespaces (< dba1be0)")
+    return ok
 
 
 def main():
@@ -159,6 +198,10 @@ def main():
                                              "reference", "jinja", lineterm = "", n = 1):
                 print("       " + line[:200])
     print(f"\n{len(CASES) - failures}/{len(CASES)} cases match the reference encoder")
+
+    # Deliberate non-adoption of the `namespace` extension must stay fail-closed
+    if not check_namespace_deferral(enc, template):
+        failures += 1
 
     # Special tokens must survive tokenization as single ids
     from tokenizers import Tokenizer

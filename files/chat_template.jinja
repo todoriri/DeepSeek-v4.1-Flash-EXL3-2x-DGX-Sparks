@@ -19,6 +19,13 @@
       * Tool-call arguments are expected as an object. The reference also accepts a JSON
         string and parses it; Jinja cannot, so a string lands in the reference's own
         fallback shape (one parameter named "arguments").
+      * The `namespace` tool extension added upstream in encoding.py commit dba1be0
+        (qualified `namespace::name`, folded namespace.description) is deliberately NOT
+        ported here: no client in this deployment sends namespaced tools, and a half-port
+        (template without the deploy-repo output parser) would break round-tripping. This
+        template fails closed on any namespaced tool (see the guards below) rather than
+        silently diverging from the reference. To adopt namespaces, port dba1be0 into both
+        this template and the output parser as a pair, and drop the guards.
 -#}
 
 {%- set dsml = "｜DSML｜" -%}
@@ -34,6 +41,16 @@
 {#- The reference disables thinking-dropping for the whole conversation as soon as any message
     carries tools, which keeps reasoning in every assistant turn -#}
 {%- set drop_thinking = not (tools is defined and tools) -%}
+
+{#- Fail closed on the unsupported `namespace` tool extension (encoding.py dba1be0): a
+    top-level or function-level `namespace`, or a `::`-qualified name, means the caller
+    expects namespaced rendering this template does not do. Inert for normal tools. -#}
+{%- for tool in (tools or []) -%}
+    {%- set fn = tool.function if tool.function is defined else tool -%}
+    {%- if (tool.namespace is defined and tool.namespace) or (fn.namespace is defined and fn.namespace) or ("::" in (fn.name if fn.name is defined else "")) -%}
+        {{ raise_exception("Tool namespaces are unsupported (encoding.py dba1be0 not ported); namespaced tool: " ~ (fn.name if fn.name is defined else "?")) }}
+    {%- endif -%}
+{%- endfor -%}
 
 {#- Reasoning effort: "low"/"high"/"max" map to 50/75/100, ints pass through -#}
 {%- set effort_in = reasoning_effort if reasoning_effort is defined and reasoning_effort is not none else "high" -%}
@@ -187,6 +204,9 @@ You MUST strictly follow the above defined tool name and parameter schemas to in
             {%- set ns.out = ns.out + "\n\n<" ~ dsml ~ " calls>\n" -%}
             {%- for tc in m.tool_calls -%}
                 {%- set fn = tc.function if tc.function is defined else tc -%}
+                {%- if (tc.namespace is defined and tc.namespace) or (fn.namespace is defined and fn.namespace) or ("::" in (fn.name if fn.name is defined else "")) -%}
+                    {{ raise_exception("Tool namespaces are unsupported (encoding.py dba1be0 not ported); namespaced tool call: " ~ (fn.name if fn.name is defined else "?")) }}
+                {%- endif -%}
                 {%- set ns.out = ns.out + "<" ~ dsml ~ " invoke name=\"" ~ fn.name ~ "\">\n" -%}
                 {%- if fn.arguments is mapping -%}
                     {%- for k, v in fn.arguments.items() -%}
