@@ -379,6 +379,7 @@ resolve_weight_backend() {
         nfs|share) printf 'nfs' ;;
         zfs) printf 'zfs' ;;
         rsync) printf 'rsync' ;;
+        shared) printf 'shared' ;;
         auto)
             if [ "${NFS_SHARE:-1}" != "0" ]; then
                 printf 'nfs'
@@ -388,7 +389,7 @@ resolve_weight_backend() {
                 printf 'rsync'
             fi
             ;;
-        *) die "unknown WEIGHT_SYNC=$WEIGHT_SYNC (nfs|zfs|rsync|auto)" ;;
+        *) die "unknown WEIGHT_SYNC=$WEIGHT_SYNC (nfs|zfs|rsync|shared|auto)" ;;
     esac
 }
 
@@ -554,6 +555,21 @@ preflight() {
     WEIGHT_BACKEND="$(resolve_weight_backend)"
     log "weight backend: ${WEIGHT_BACKEND} (WEIGHT_SYNC=${WEIGHT_SYNC})"
     case "$WEIGHT_BACKEND" in
+        shared)
+            # Both ranks see the weights at the same absolute path: the head
+            # holds MODEL_HOST/ENGRAM locally, the worker already NFS-mounts that
+            # tree (rw) at the identical path. Bind it directly on both ranks —
+            # no copy, and NOT the kit's own NFS exporter, which spins up a
+            # privileged nfsd on --network host and would collide with the host
+            # nfsd already serving this cluster's other lanes.
+            HEAD_ENGRAM_BIND="$ENGRAM_SRC"
+            WORKER_MODEL_BIND="$MODEL_HOST"
+            WORKER_ENGRAM_BIND="$ENGRAM_SRC"
+            worker_ssh "test -r '$MODEL_HOST/config.json'" \
+                || die "worker cannot read $MODEL_HOST/config.json — is the shared weights path mounted on the worker (e.g. /mnt/storage1 over NFS)?"
+            worker_ssh "test -r '$ENGRAM_DIR/model-00047-of-00048.safetensors'" \
+                || die "worker cannot read Engram shard 47 under $ENGRAM_DIR over the shared mount"
+            ;;
         nfs)
             HEAD_ENGRAM_BIND="$ENGRAM_SRC"
             WORKER_MODEL_BIND="$NFS_VOLUME_MODEL"
@@ -936,6 +952,14 @@ sync_weights() {
     prepare_engram_src_dir
     local backend="${WEIGHT_BACKEND:-$(resolve_weight_backend)}"
     case "$backend" in
+        shared)
+            # prepare_engram_src_dir (above) hardlinked shards 47+48 + wrote the
+            # embed-only index into ENGRAM_SRC on the shared fs; both ranks bind
+            # MODEL_HOST + ENGRAM_SRC over the same mount. Nothing to copy.
+            worker_ssh "test -r '$ENGRAM_SRC/model.safetensors.index.json'" \
+                || die "worker cannot read the slim Engram index at $ENGRAM_SRC over the shared mount"
+            log "worker weights in sync (shared mount: EXL3 $MODEL_HOST + slim Engram $ENGRAM_SRC; no copy)"
+            ;;
         nfs)
             nfs_share
             log "worker weights in sync (NFS, no local copy)"
