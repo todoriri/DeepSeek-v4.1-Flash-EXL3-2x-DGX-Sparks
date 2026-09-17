@@ -224,7 +224,7 @@ target.
 ./start.sh logs
 ./start.sh logs worker
 ./start.sh stop
-./start.sh pack                   # optional: Engram rows onto each node's NVMe (+25–50 % prefill)
+./start.sh pack                   # pre-pack Engram rows onto each node's NVMe (+25–50 % prefill); boot auto-packs when it fits
 SKIP_SYNC=1 ./start.sh restart    # weights already on the worker
 BUILD=1 ./start.sh                # force overlay rebuild
 ```
@@ -387,7 +387,15 @@ node-local copy with no pool, and no incremental updates.
 `./start.sh pack` writes vLLM hash-head `engram-l{1,14}-r<rank>of2.bin` shards
 onto each node's local NVMe (47.2 GiB per layer per rank at TP=2, so ~94 GiB per
 node; packing took 8.5 min). Decode and prefill then miss to local O_DIRECT
-instead of NFS — worth 25–50 % of prefill. Not required to boot.
+instead of NFS — worth 25–50 % of prefill.
+
+`./start.sh` now does this automatically: after weights are staged it runs a
+gated auto-pack (`DSV41_AUTO_PACK=auto`, the default), packing each rank whose
+shards are missing **and** whose node has `DSV41_PACK_MIN_FREE_GIB` (default 105)
+free — otherwise that node just stays file-backed over NFS. The first boot pays
+the one-time ~8.5 min pack; later boots detect the shards and skip. Set
+`DSV41_AUTO_PACK=1` to force (fail if a node is short of disk), or `=0` to keep
+the old manual-only behaviour.
 
 ## CX7
 

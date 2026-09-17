@@ -31,7 +31,7 @@
 # Usage:
 #   ./start.sh                    start (share/launch) — default
 #   ./start.sh share              NFSv4 export + worker docker volumes (no copy)
-#   ./start.sh pack               pack Engram rows onto local NVMe (optional)
+#   ./start.sh pack               pack Engram rows onto local NVMe (boot auto-packs when it fits; DSV41_AUTO_PACK=0 disables)
 #   ./start.sh stop               stop both nodes
 #   ./start.sh restart            stop + start
 #   ./start.sh status             containers + API health
@@ -287,6 +287,18 @@ WEIGHT_BUDGET_HOST="${WEIGHT_BUDGET_HOST:-$SCRIPT_DIR/scripts/weight_budget.py}"
 HEAD_PACKED_DIR="${HEAD_PACKED_DIR:-$HOME/dsv41-engram}"
 WORKER_PACKED_DIR="${WORKER_PACKED_DIR:-$WORKER_HOME/dsv41-engram}"
 PACKED_MOUNT="${PACKED_MOUNT:-/engram-packed}"
+# Boot-path Engram auto-pack (see maybe_pack_engram): auto = pack each rank onto
+# its own NVMe when the shards are missing and the node has >= MIN_FREE GiB free,
+# else stay file-backed over NFS; 1 = force (die on no space); 0 = never (pack by
+# hand with ./start.sh pack).
+DSV41_AUTO_PACK="${DSV41_AUTO_PACK:-auto}"
+DSV41_PACK_MIN_FREE_GIB="${DSV41_PACK_MIN_FREE_GIB:-105}"
+# vLLM stall watchdog (separate gb10-watchdog compose project, restart=unless-stopped).
+# It force-restarts the head when /metrics is unreachable for ~180s — shorter than a cold
+# boot — so start/stop pause it and on_ready re-arms it, else it kills the boot mid-load
+# (relaunch-race NCCL deadlock). 1 = manage it, 0 = never touch it.
+VLLM_WATCHDOG_CONTAINER="${VLLM_WATCHDOG_CONTAINER:-vllm-watchdog}"
+DSV41_MANAGE_WATCHDOG="${DSV41_MANAGE_WATCHDOG:-1}"
 
 LOGDIR="$SCRIPT_DIR/logs"
 HEAD_SCRIPT="$SCRIPT_DIR/.dsv41-exl3-head.inner.sh"
@@ -994,6 +1006,41 @@ share_weights() {
     nfs_share
 }
 
+# Pack one rank's owned Engram rows into contiguous 264 B records on that node's
+# local NVMe (scripts/pack_engram.py). pack_engram.py is idempotent: a shard that
+# already exists at the right size is skipped, so these are safe to re-run.
+pack_head_rank() {
+    mkdir -p "$HEAD_PACKED_DIR"
+    log "packing head Engram rank 0 of TP=${TP} into $HEAD_PACKED_DIR ..."
+    docker run --rm --network host \
+        -v "$ENGRAM_SRC:/models:ro" \
+        -v "$HEAD_PACKED_DIR:/engram" \
+        --entrypoint python3 "$IMAGE" \
+        /opt/dsv41/pack_engram.py --model /models --rank 0 --tp "$TP" --out /engram
+}
+
+pack_worker_rank() {
+    local backend="$1" pack_src
+    worker_ssh "mkdir -p '$WORKER_PACKED_DIR'"
+    pack_src="$WORKER_ENGRAM_BIND"
+    [ "$backend" = "nfs" ] && pack_src="$NFS_VOLUME_ENGRAM"
+    log "packing worker Engram rank 1 of TP=${TP} (from NFS/slim src, not a 190 GiB copy) into $WORKER_PACKED_DIR ..."
+    worker_ssh "docker run --rm --network host \
+        -v '$pack_src:/models:ro' \
+        -v '$WORKER_PACKED_DIR:/engram' \
+        --entrypoint python3 '$IMAGE' \
+        /opt/dsv41/pack_engram.py --model /models --rank 1 --tp '$TP' --out /engram"
+}
+
+# Both Engram layers already packed for the given node's rank?
+packed_present() {
+    case "$1" in
+        head)   [ -f "$HEAD_PACKED_DIR/engram-l1-r0of${TP}.bin" ] \
+                && [ -f "$HEAD_PACKED_DIR/engram-l14-r0of${TP}.bin" ] ;;
+        worker) worker_ssh "[ -f '$WORKER_PACKED_DIR/engram-l1-r1of${TP}.bin' ] && [ -f '$WORKER_PACKED_DIR/engram-l14-r1of${TP}.bin' ]" ;;
+    esac
+}
+
 pack_engram() {
     preflight
     ensure_image
@@ -1004,23 +1051,66 @@ pack_engram() {
     else
         sync_weights
     fi
-    mkdir -p "$HOME/dsv41-engram"
-    log "packing head Engram rank 0 of TP=${TP} into $HOME/dsv41-engram ..."
-    docker run --rm --network host \
-        -v "$ENGRAM_SRC:/models:ro" \
-        -v "$HOME/dsv41-engram:/engram" \
-        --entrypoint python3 "$IMAGE" \
-        /opt/dsv41/pack_engram.py --model /models --rank 0 --tp "$TP" --out /engram
-    log "packing worker Engram rank 1 (from NFS/slim src, not a 190 GiB copy) ..."
-    worker_ssh "mkdir -p '$WORKER_HOME/dsv41-engram'"
-    local pack_src="$WORKER_ENGRAM_BIND"
-    [ "$backend" = "nfs" ] && pack_src="$NFS_VOLUME_ENGRAM"
-    worker_ssh "docker run --rm --network host \
-        -v '$pack_src:/models:ro' \
-        -v '$WORKER_HOME/dsv41-engram:/engram' \
-        --entrypoint python3 '$IMAGE' \
-        /opt/dsv41/pack_engram.py --model /models --rank 1 --tp '$TP' --out /engram"
-    log "packed Engram shards written (vLLM hash-head ranges). File-backed lookup uses them when mounted at /engram-packed."
+    pack_head_rank
+    pack_worker_rank "$backend"
+    log "packed Engram shards written (vLLM hash-head ranges). File-backed lookup uses them when mounted at $PACKED_MOUNT."
+}
+
+# Boot-path auto-pack: put each rank's Engram on its own NVMe so the worker (and
+# head) miss to local O_DIRECT instead of the head's NFS export (~+25-50% prefill,
+# the sister repo's boot-10 lever). Non-fatal in auto mode: any node short of disk
+# or a failed pack just stays file-backed over NFS. Weights/NFS must be staged
+# first, so start() calls this after sync_weights. First boot pays a one-time
+# ~8-9 min pack; later boots detect the shards and skip.
+maybe_pack_engram() {
+    local mode="${DSV41_AUTO_PACK:-auto}"
+    if [ "$mode" = "0" ]; then
+        log "auto-pack: off (DSV41_AUTO_PACK=0); Engram stays file-backed over ${WEIGHT_BACKEND:-nfs}"
+        return 0
+    fi
+    local backend="${WEIGHT_BACKEND:-$(resolve_weight_backend)}"
+    local floor="${DSV41_PACK_MIN_FREE_GIB:-105}"
+    local force=0; [ "$mode" = "1" ] && force=1
+
+    if packed_present head; then
+        log "auto-pack: head already packed at $HEAD_PACKED_DIR (skip)"
+    else
+        mkdir -p "$HEAD_PACKED_DIR"
+        local hfree
+        hfree="$(df -PB1 "$HEAD_PACKED_DIR" 2>/dev/null | awk 'NR==2{printf "%d", $4/1073741824}')" || true
+        if [ "${hfree:-0}" -ge "$floor" ]; then
+            log "auto-pack: head has ${hfree} GiB free — packing rank 0 (one-time, ~8-9 min) ..."
+            if ! pack_head_rank; then
+                [ "$force" = 1 ] && die "auto-pack: head pack failed"
+                warn "auto-pack: head pack failed — booting file-backed (NFS)"
+            fi
+        elif [ "$force" = 1 ]; then
+            die "auto-pack: head has ${hfree:-0} GiB free at $HEAD_PACKED_DIR, need >= ${floor} (DSV41_PACK_MIN_FREE_GIB)"
+        else
+            log "auto-pack: head has ${hfree:-0} GiB free at $HEAD_PACKED_DIR (< ${floor}); staying file-backed"
+        fi
+    fi
+
+    if [ "${NNODES:-1}" -gt 1 ]; then
+        if packed_present worker; then
+            log "auto-pack: worker already packed at $WORKER_PACKED_DIR (skip)"
+        else
+            worker_ssh "mkdir -p '$WORKER_PACKED_DIR'" || true
+            local wfree
+            wfree="$(worker_ssh "df -PB1 '$WORKER_PACKED_DIR' | awk 'NR==2{printf \"%d\", \$4/1073741824}'" 2>/dev/null)" || true
+            if [ "${wfree:-0}" -ge "$floor" ]; then
+                log "auto-pack: worker has ${wfree} GiB free — packing rank 1 (one-time, ~8-9 min) ..."
+                if ! pack_worker_rank "$backend"; then
+                    [ "$force" = 1 ] && die "auto-pack: worker pack failed"
+                    warn "auto-pack: worker pack failed — worker boots file-backed (NFS)"
+                fi
+            elif [ "$force" = 1 ]; then
+                die "auto-pack: worker has ${wfree:-0} GiB free at $WORKER_PACKED_DIR, need >= ${floor} (DSV41_PACK_MIN_FREE_GIB)"
+            else
+                log "auto-pack: worker has ${wfree:-0} GiB free at $WORKER_PACKED_DIR (< ${floor}); worker stays file-backed over NFS"
+            fi
+        fi
+    fi
 }
 
 
@@ -1640,7 +1730,30 @@ collect_failure_logs() {
 }
 
 # ------------------------------- stop --------------------------------------
+# --- vLLM stall watchdog (gb10-watchdog compose project) -------------------
+# Paused across a boot so its 180s /metrics-stall trigger can't force-restart the
+# head mid-load; re-armed by on_ready once the server is healthy. Both are no-ops
+# when DSV41_MANAGE_WATCHDOG=0 or the container is absent, and never fatal.
+pause_watchdog() {
+    [ "${DSV41_MANAGE_WATCHDOG:-1}" = "1" ] || return 0
+    if [ "$(docker inspect -f '{{.State.Running}}' "$VLLM_WATCHDOG_CONTAINER" 2>/dev/null)" = "true" ]; then
+        log "pausing $VLLM_WATCHDOG_CONTAINER (its 180s stall trigger would restart the head mid-boot) ..."
+        docker stop "$VLLM_WATCHDOG_CONTAINER" >/dev/null 2>&1 \
+            && log "$VLLM_WATCHDOG_CONTAINER paused" \
+            || warn "could not pause $VLLM_WATCHDOG_CONTAINER — watch for a mid-boot restart"
+    fi
+}
+resume_watchdog() {
+    [ "${DSV41_MANAGE_WATCHDOG:-1}" = "1" ] || return 0
+    if docker inspect "$VLLM_WATCHDOG_CONTAINER" >/dev/null 2>&1; then
+        docker start "$VLLM_WATCHDOG_CONTAINER" >/dev/null 2>&1 \
+            && log "re-armed $VLLM_WATCHDOG_CONTAINER" \
+            || warn "could not re-arm $VLLM_WATCHDOG_CONTAINER — start it by hand: docker start $VLLM_WATCHDOG_CONTAINER"
+    fi
+}
+
 stop() {
+    pause_watchdog
     log "stopping head container ..."
     docker rm -f "$CONTAINER_HEAD" >/dev/null 2>&1 || log "  (no head container was running)"
     log "stopping worker container on ${WORKER_SSH} ..."
@@ -1701,6 +1814,7 @@ post_ready_warmup() {
 }
 
 on_ready() {
+    resume_watchdog
     log "======================================================================"
     log "DeepSeek-V4.1-Flash EXL3 is UP (TP=${TP}, nnodes=${NNODES})"
     log "  endpoints  : http://127.0.0.1:${PORT}/v1   (LAN: ${HEAD_IP}:${PORT})"
@@ -1741,10 +1855,12 @@ on_ready() {
 }
 
 start() {
+    pause_watchdog
     preflight
     ensure_image
     check_weights
     sync_weights
+    maybe_pack_engram || warn "auto-pack: skipped (non-fatal) — Engram stays file-backed"
     write_inner_scripts
 
     log "model load path (in-container): ${MODEL_DIR}"
