@@ -385,19 +385,21 @@ def test_recipe_wiring_if_present() -> None:
     launcher = start.read_text()
     image = dockerfile.read_text()
     assert 'XGRAMMAR_PATCH_HOST="${XGRAMMAR_PATCH_HOST:-' in launcher
-    assert launcher.count("python3 /opt/glm53/patch_xgrammar_termination.py") == 2
+    # Wired 4x under /opt/dsv41: applied on head + worker (the `for p in … ; do
+    # python3 "$p"; done` loop) and bind-mounted into both containers.
+    assert launcher.count("/opt/dsv41/patch_xgrammar_termination.py") == 4
     assert (
         "-v '/tmp/patch_xgrammar_termination.py:"
-        "/opt/glm53/patch_xgrammar_termination.py:ro'" in launcher
+        "/opt/dsv41/patch_xgrammar_termination.py:ro'" in launcher
     )
     assert (
         '-v "$XGRAMMAR_PATCH_HOST:'
-        '/opt/glm53/patch_xgrammar_termination.py:ro"' in launcher
+        '/opt/dsv41/patch_xgrammar_termination.py:ro"' in launcher
     )
     assert "scp -q -o BatchMode=yes \"$XGRAMMAR_PATCH_HOST\"" in launcher
     assert "COPY overlay/patch_xgrammar_termination.py" in image
-    assert "RUN python3 /opt/glm53/patch_xgrammar_termination.py" in image
-    assert "python3 /opt/glm53/test_xgrammar_termination.py" in image
+    assert "RUN python3 /opt/dsv41/patch_xgrammar_termination.py" in image
+    assert "python3 /opt/dsv41/test_xgrammar_termination.py" in image
 
 
 def main() -> int:
