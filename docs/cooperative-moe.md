@@ -126,8 +126,9 @@ Completed host-side checks include 113 dispatch assertions, seven profile
 integrity/creation tests, shell syntax and Python formatting checks. The original
 implementation has the GPU/full-serving evidence above. Post-merge revalidation
 on the two-Spark cluster reproduced the decode speedup after a local binary was
-repinned; a clean image rebuild is not a substitute for that pin. Operator
-opt-in now stages the validated `a09a589c…` artifact. Near-600K prefill and a
+repinned; an ungated image rebuild is not a substitute for that pin. Operator
+opt-in now stages this fork's gated, repinned `9a9c44f0…` artifact. Near-600K
+prefill and a
 prolonged production burn-in were not repeated in this comparison. Upstream
 build/distribution integration and support beyond the documented configuration
 remain explicit review decisions; default serving behavior is unchanged.

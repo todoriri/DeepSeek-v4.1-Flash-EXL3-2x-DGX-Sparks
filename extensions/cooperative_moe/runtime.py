@@ -16,7 +16,7 @@ import os
 from pathlib import Path
 import torch
 
-SHA256 = "a09a589cbdcecb5372991c7b091d732236d58bc5f5aea14ab91e38e426f08d78"
+SHA256 = "9a9c44f0e423e3cfe595f195925e520af8e1b5bc56814fcaefccda87a4e983ae"
 PTR_KEYS = (
     "gate_trellis",
     "gate_suh",

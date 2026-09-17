@@ -185,16 +185,15 @@ GNU build-id). `prepare_profile.py` will reject a rebuilt `.so` that is not the
 pin below.
 
 **Binary pin** (sha256 of `cooperative_moe.so`):
-`a09a589cbdcecb5372991c7b091d732236d58bc5f5aea14ab91e38e426f08d78`
+`9a9c44f0e423e3cfe595f195925e520af8e1b5bc56814fcaefccda87a4e983ae`
 
-Put that file at
+This binary ships checked in at
 `extensions/cooperative_moe/artifacts/cooperative_moe.so` (root `.gitignore` skips
-`*.so` except this path) or keep a matching GitHub Release asset.
-Then:
+`*.so` except this path), so a fork checkout already has it. Verify it:
 
 ```bash
 printf '%s  cooperative_moe.so\n' \
-  'a09a589cbdcecb5372991c7b091d732236d58bc5f5aea14ab91e38e426f08d78' |
+  '9a9c44f0e423e3cfe595f195925e520af8e1b5bc56814fcaefccda87a4e983ae' |
   sha256sum -c
 ```
 
@@ -214,9 +213,11 @@ Paired measurements (recipe `979e68a`, same checkpoint/image/k=3/600K/2 seqs):
 | Uncached 32K prefill | 1138 tok/s | ~unchanged |
 
 Post-merge revalidation on the same pair saw C1 **+25.3%** and C2 **+35.2%**
-after a locally rebuilt binary was **repinned**; that rebuild is not a substitute
-for `a09a589c…`. Arithmetic is not bit-exact with stock. Vision and near-limit
-context were not the validation target.
+after a locally rebuilt binary was **repinned**; this fork's pinned `9a9c44f0…`
+binary is that gated rebuild (see `docs/cooperative-moe-build-repin.md`), and a
+rebuild that has not passed the 54-case gate is not a substitute. Arithmetic is
+not bit-exact with stock. Vision and near-limit context were not the validation
+target.
 
 ```bash
 ./start.sh status

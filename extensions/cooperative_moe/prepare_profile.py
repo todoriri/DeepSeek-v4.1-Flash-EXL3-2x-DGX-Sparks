@@ -9,8 +9,8 @@ import hashlib
 from pathlib import Path, PurePosixPath
 
 STOCK_SHA = "ccdc69bfa04bff4870c3e555736a990fde6448ddb329441c4e0a27d6fc41078d"
-BINARY_SHA = "a09a589cbdcecb5372991c7b091d732236d58bc5f5aea14ab91e38e426f08d78"
-ADAPTER_SHA = "9f1d10ffc39ac4433828a000c4932a4a773b00acadd80b46c7568f494a77b2fb"
+BINARY_SHA = "9a9c44f0e423e3cfe595f195925e520af8e1b5bc56814fcaefccda87a4e983ae"
+ADAPTER_SHA = "20c1bbf2663f61843c6c46de803bb134243c62799e3762ca3f5afe28c533491a"
 
 
 def checked(path, digest):

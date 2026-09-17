@@ -1,0 +1,94 @@
+/build/out/upstream/exllamav3/exllamav3_ext/quant/../util.cuh(12): warning #20012-D: __device__ annotation is ignored on a non-virtual function("half4") that is explicitly defaulted on its first declaration
+      __attribute__((device)) half4() = default;
+                     ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+/build/out/upstream/exllamav3/exllamav3_ext/quant/../util.cuh(24): warning #20012-D: __device__ annotation is ignored on a non-virtual function("bfloat164") that is explicitly defaulted on its first declaration
+      __attribute__((device)) bfloat164() = default;
+                     ^
+
+/build/out/upstream/exllamav3/exllamav3_ext/quant/../util.cuh(38): warning #20012-D: __device__ annotation is ignored on a non-virtual function("half8") that is explicitly defaulted on its first declaration
+       __attribute__((device)) half8() = default;
+                      ^
+
+/build/out/upstream/exllamav3/exllamav3_ext/quant/../util.cuh(12): warning #20012-D: __device__ annotation is ignored on a non-virtual function("half4") that is explicitly defaulted on its first declaration
+      __attribute__((device)) half4() = default;
+                     ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+/build/out/upstream/exllamav3/exllamav3_ext/quant/../util.cuh(24): warning #20012-D: __device__ annotation is ignored on a non-virtual function("bfloat164") that is explicitly defaulted on its first declaration
+      __attribute__((device)) bfloat164() = default;
+                     ^
+
+/build/out/upstream/exllamav3/exllamav3_ext/quant/../util.cuh(38): warning #20012-D: __device__ annotation is ignored on a non-virtual function("half8") that is explicitly defaulted on its first declaration
+       __attribute__((device)) half8() = default;
+                      ^
+
+ptxas info    : 0 bytes gmem
+ptxas info    : Compiling entry function '_ZN20goal50_fixed_coop_ns22exl3_moe_coop_b_kernelILi4ELi2ELb0EEEv13MoeCoopParams' for 'sm_121a'
+ptxas info    : Function properties for _ZN20goal50_fixed_coop_ns22exl3_moe_coop_b_kernelILi4ELi2ELb0EEEv13MoeCoopParams
+    8 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 60 registers, used 1 barriers, 8 bytes cumulative stack size, 48 bytes smem
+ptxas info    : Compile time = 48.045 ms
+ptxas info    : Compiling entry function '_ZN20goal50_fixed_coop_ns22exl3_moe_coop_b_kernelILi4ELi2ELb1EEEv13MoeCoopParams' for 'sm_121a'
+ptxas info    : Function properties for _ZN20goal50_fixed_coop_ns22exl3_moe_coop_b_kernelILi4ELi2ELb1EEEv13MoeCoopParams
+    8 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 60 registers, used 1 barriers, 8 bytes cumulative stack size, 48 bytes smem
+ptxas info    : Compile time = 25.322 ms
+ptxas info    : Compiling entry function '_ZN20goal50_fixed_coop_ns22exl3_moe_coop_a_kernelILi4ELi2ELb0EEEv13MoeCoopParams' for 'sm_121a'
+ptxas info    : Function properties for _ZN20goal50_fixed_coop_ns22exl3_moe_coop_a_kernelILi4ELi2ELb0EEEv13MoeCoopParams
+    8 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 61 registers, used 1 barriers, 8 bytes cumulative stack size, 48 bytes smem
+ptxas info    : Compile time = 36.406 ms
+ptxas info    : Compiling entry function '_ZN20goal50_fixed_coop_ns22exl3_moe_coop_a_kernelILi4ELi2ELb1EEEv13MoeCoopParams' for 'sm_121a'
+ptxas info    : Function properties for _ZN20goal50_fixed_coop_ns22exl3_moe_coop_a_kernelILi4ELi2ELb1EEEv13MoeCoopParams
+    8 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 64 registers, used 1 barriers, 8 bytes cumulative stack size, 48 bytes smem
+ptxas info    : Compile time = 34.882 ms
+ptxas info    : Compiling entry function '_ZN20goal50_fixed_coop_ns22exl3_moe_coop_b_kernelILi3ELi2ELb0EEEv13MoeCoopParams' for 'sm_121a'
+ptxas info    : Function properties for _ZN20goal50_fixed_coop_ns22exl3_moe_coop_b_kernelILi3ELi2ELb0EEEv13MoeCoopParams
+    8 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 57 registers, used 1 barriers, 8 bytes cumulative stack size, 48 bytes smem
+ptxas info    : Compile time = 27.241 ms
+ptxas info    : Compiling entry function '_ZN20goal50_fixed_coop_ns22exl3_moe_coop_b_kernelILi3ELi2ELb1EEEv13MoeCoopParams' for 'sm_121a'
+ptxas info    : Function properties for _ZN20goal50_fixed_coop_ns22exl3_moe_coop_b_kernelILi3ELi2ELb1EEEv13MoeCoopParams
+    8 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 58 registers, used 1 barriers, 8 bytes cumulative stack size, 48 bytes smem
+ptxas info    : Compile time = 26.968 ms
+ptxas info    : Compiling entry function '_ZN20goal50_fixed_coop_ns22exl3_moe_coop_a_kernelILi3ELi2ELb0EEEv13MoeCoopParams' for 'sm_121a'
+ptxas info    : Function properties for _ZN20goal50_fixed_coop_ns22exl3_moe_coop_a_kernelILi3ELi2ELb0EEEv13MoeCoopParams
+    8 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 63 registers, used 1 barriers, 8 bytes cumulative stack size, 48 bytes smem
+ptxas info    : Compile time = 38.004 ms
+ptxas info    : Compiling entry function '_ZN20goal50_fixed_coop_ns22exl3_moe_coop_a_kernelILi3ELi2ELb1EEEv13MoeCoopParams' for 'sm_121a'
+ptxas info    : Function properties for _ZN20goal50_fixed_coop_ns22exl3_moe_coop_a_kernelILi3ELi2ELb1EEEv13MoeCoopParams
+    8 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 63 registers, used 1 barriers, 8 bytes cumulative stack size, 48 bytes smem
+ptxas info    : Compile time = 37.558 ms
+ptxas info    : Compiling entry function '_ZN20goal50_fixed_coop_ns22exl3_moe_coop_b_kernelILi2ELi2ELb0EEEv13MoeCoopParams' for 'sm_121a'
+ptxas info    : Function properties for _ZN20goal50_fixed_coop_ns22exl3_moe_coop_b_kernelILi2ELi2ELb0EEEv13MoeCoopParams
+    8 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 60 registers, used 1 barriers, 8 bytes cumulative stack size, 48 bytes smem
+ptxas info    : Compile time = 25.506 ms
+ptxas info    : Compiling entry function '_ZN20goal50_fixed_coop_ns22exl3_moe_coop_b_kernelILi2ELi2ELb1EEEv13MoeCoopParams' for 'sm_121a'
+ptxas info    : Function properties for _ZN20goal50_fixed_coop_ns22exl3_moe_coop_b_kernelILi2ELi2ELb1EEEv13MoeCoopParams
+    8 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 61 registers, used 1 barriers, 8 bytes cumulative stack size, 48 bytes smem
+ptxas info    : Compile time = 24.763 ms
+ptxas info    : Compiling entry function '_ZN20goal50_fixed_coop_ns22exl3_moe_coop_a_kernelILi2ELi2ELb0EEEv13MoeCoopParams' for 'sm_121a'
+ptxas info    : Function properties for _ZN20goal50_fixed_coop_ns22exl3_moe_coop_a_kernelILi2ELi2ELb0EEEv13MoeCoopParams
+    8 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 64 registers, used 1 barriers, 8 bytes cumulative stack size, 48 bytes smem
+ptxas info    : Compile time = 35.440 ms
+ptxas info    : Compiling entry function '_ZN20goal50_fixed_coop_ns22exl3_moe_coop_a_kernelILi2ELi2ELb1EEEv13MoeCoopParams' for 'sm_121a'
+ptxas info    : Function properties for _ZN20goal50_fixed_coop_ns22exl3_moe_coop_a_kernelILi2ELi2ELb1EEEv13MoeCoopParams
+    8 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 63 registers, used 1 barriers, 8 bytes cumulative stack size, 48 bytes smem
+ptxas info    : Compile time = 35.984 ms
+ptxas info    : Compiling entry function '_ZN20goal50_fixed_coop_ns24exl3_moe_coop_rot_kernelE13MoeCoopParams' for 'sm_121a'
+ptxas info    : Function properties for _ZN20goal50_fixed_coop_ns24exl3_moe_coop_rot_kernelE13MoeCoopParams
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 31 registers, used 1 barriers, 1104 bytes smem
+ptxas info    : Compile time = 13.179 ms

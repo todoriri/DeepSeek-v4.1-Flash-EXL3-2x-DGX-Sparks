@@ -90,9 +90,9 @@ and two clean `nvcc` runs of the same sources produce different GNU build-ids an
 CUDA `-lineinfo` metadata. `prepare_profile.py` correctly rejects those binaries.
 
 Install the GPU-validated `cooperative_moe.so` whose digest is
-`a09a589cbdcecb5372991c7b091d732236d58bc5f5aea14ab91e38e426f08d78`. Prefer a
-checked-in file at `extensions/cooperative_moe/artifacts/cooperative_moe.so`, or
-the matching GitHub Release asset. Then:
+`9a9c44f0e423e3cfe595f195925e520af8e1b5bc56814fcaefccda87a4e983ae`. It ships
+checked in at `extensions/cooperative_moe/artifacts/cooperative_moe.so`, so a
+fork checkout already has it. Then:
 
 ```bash
 COOP_SO="$COOP_REPO/extensions/cooperative_moe/artifacts/cooperative_moe.so"
@@ -103,7 +103,7 @@ install -m 644 "$COOP_SO" "$COOP_REPO/extensions/cooperative_moe/runtime.py" \
 (
   cd "$COOP_RUN/build"
   printf '%s  cooperative_moe.so\n' \
-    'a09a589cbdcecb5372991c7b091d732236d58bc5f5aea14ab91e38e426f08d78' |
+    '9a9c44f0e423e3cfe595f195925e520af8e1b5bc56814fcaefccda87a4e983ae' |
     sha256sum -c
 )
 ```
@@ -282,6 +282,6 @@ enable the feature. No model weights, caches or rollback files need deletion.
 The launcher wiring, immutable image manifest, command syntax, paths, source pins
 and host-side tests have been checked. Post-merge revalidation confirmed the
 decode speedup when a locally rebuilt binary was **repinned after** the 54-case
-GPU gate. The published operator path is the validated `a09a589c…` artifact, not
-a clean image rebuild. Record the release-asset or in-tree `.so` placement
-before treating this runbook as executable from a checkout that lacks that file.
+GPU gate. This fork's operator path installs exactly that gated rebuild — the
+in-tree `9a9c44f0…` artifact (see `docs/cooperative-moe-build-repin.md`), not an
+ungated image rebuild. The `.so` ships in-tree, so a fork checkout already has it.
