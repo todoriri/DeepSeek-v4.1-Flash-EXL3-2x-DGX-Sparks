@@ -1408,6 +1408,20 @@ launch_cluster() {
         -e "NCCL_LL128_BUFFSIZE=$NCCL_LL128_BUFFSIZE"
         -e "NCCL_PROTO=$NCCL_PROTO"
         -e "NCCL_MAX_NCHANNELS=$NCCL_MAX_NCHANNELS"
+        # NCCL Flight Recorder (both ranks): a ring buffer of the last N collectives
+        # per rank (op, sizes, started/completed state). On a silent TP stall this is
+        # the ONE artifact that names which collective each rank was on and which rank
+        # never arrived -- the runtime deadlock of 2026-09-18 (engine froze mid-decode,
+        # front-end still 200) left no such evidence because the external vllm-watchdog
+        # docker-restarts before torch's own collective timeout fires. DUMP_ON_TIMEOUT
+        # writes the buffer to TEMP_FILE on a torch timeout; PIPE_FILE lets the watchdog
+        # trigger an on-demand dump at its 180s stall (echo >pipe) BEFORE it restarts.
+        # Containers run detached (not --rm), so a /tmp dump survives docker restart and
+        # is retrievable via docker exec/cp. Negligible per-collective overhead.
+        -e "TORCH_NCCL_TRACE_BUFFER_SIZE=${TORCH_NCCL_TRACE_BUFFER_SIZE:-20000}"
+        -e "TORCH_NCCL_DUMP_ON_TIMEOUT=${TORCH_NCCL_DUMP_ON_TIMEOUT:-1}"
+        -e "TORCH_NCCL_DEBUG_INFO_TEMP_FILE=${TORCH_NCCL_DEBUG_INFO_TEMP_FILE:-/tmp/dsv41_nccl_flight_rank_}"
+        -e "TORCH_NCCL_DEBUG_INFO_PIPE_FILE=${TORCH_NCCL_DEBUG_INFO_PIPE_FILE:-/tmp/dsv41_nccl_flight_pipe}"
         # vLLM runs the shared experts on a side CUDA stream for batches up to
         # VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD (256) tokens, concurrently
         # with the routed experts. Here both are EXL3 and every exllamav3
