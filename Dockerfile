@@ -21,6 +21,7 @@ FROM ${BASE}
 
 COPY overlay/patch_exl3_ext_aarch64.py /opt/dsv41/patch_exl3_ext_aarch64.py
 COPY overlay/patch_exl3_fat_kernel.py /opt/dsv41/patch_exl3_fat_kernel.py
+COPY overlay/patch_exl3_cooperative_launch.py /opt/dsv41/patch_exl3_cooperative_launch.py
 COPY overlay/exl3_fat_gemm.cu /opt/dsv41/exl3-fat-kernel/exl3_fat_gemm.cu
 COPY overlay/exl3_fat_gemm.cuh /opt/dsv41/exl3-fat-kernel/exl3_fat_gemm.cuh
 COPY overlay/exl3_fat_moe.cu /opt/dsv41/exl3-fat-kernel/exl3_fat_moe.cu
@@ -34,6 +35,16 @@ COPY overlay/build_exl3_fat_moe_ext.py /opt/dsv41/build_exl3_fat_moe_ext.py
 # v0.0.43 fused exl3_moe TORCH_CHECKs mcg-only. This checkpoint is mul1.
 # v1.4.5 instantiates cb1 (mcg) and cb2 (mul1) fused MoE kernels.
 ARG EXLLAMAV3_COMMIT=e648f1a131365aae15920073e761a3fa5a527654
+# Opt-in: launch the fused exl3_moe kernel with cudaLaunchCooperativeKernel, like
+# exl3_gemm.cu already does. The kernel's group barriers require every block of
+# the grid to be co-resident, and a plain cudaLaunchKernel enforces nothing --
+# a non-resident block spins the device-global barrier forever with no error
+# (the gb10 wedge, 2026-09-19). Cooperative launch makes the launch atomic and
+# turns an unlaunchable grid into cudaErrorCooperativeLaunchTooLarge instead of
+# a silent deadlock. OFF by default: the pinned recipe image stays unchanged and
+# a candidate with this ON must pass the GPU gate (docs/exl3-moe-barrier.md)
+# before it is repinned. Build with --build-arg EXLLAMAV3_MOE_COOP_LAUNCH=1.
+ARG EXLLAMAV3_MOE_COOP_LAUNCH=0
 ENV TORCH_CUDA_ARCH_LIST=12.1a
 ENV FLASHINFER_CUDA_ARCH_LIST=12.1a
 ENV MAX_JOBS=8
@@ -93,6 +104,11 @@ RUN set -eux; \
     python3 -c "from pathlib import Path; assert (Path('/tmp/exllamav3')/'exllamav3/modules/quant/exl3.py').is_file()"; \
     python3 /opt/dsv41/patch_exl3_ext_aarch64.py /tmp/exllamav3/exllamav3/exllamav3_ext; \
     python3 /opt/dsv41/patch_exl3_fat_kernel.py /tmp/exllamav3/exllamav3/exllamav3_ext /opt/dsv41/exl3-fat-kernel; \
+    if [ "${EXLLAMAV3_MOE_COOP_LAUNCH}" = "1" ]; then \
+      python3 /opt/dsv41/patch_exl3_cooperative_launch.py /tmp/exllamav3/exllamav3/exllamav3_ext; \
+    else \
+      python3 /opt/dsv41/patch_exl3_cooperative_launch.py --check /tmp/exllamav3/exllamav3/exllamav3_ext; \
+    fi; \
     PY_SITE="$(python3 -c 'import site; print(site.getsitepackages()[0])')"; \
     export CPATH="${PY_SITE}/nvidia/cu13/include${CPATH:+:$CPATH}"; \
     export CPLUS_INCLUDE_PATH="${PY_SITE}/nvidia/cu13/include${CPLUS_INCLUDE_PATH:+:$CPLUS_INCLUDE_PATH}"; \
