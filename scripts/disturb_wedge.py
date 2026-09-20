@@ -47,9 +47,21 @@ import uuid
 FILLER = "the quick brown fox jumps over the lazy dog. "
 
 
-def prompt_for(tokens: int, nonce: str) -> str:
+def prompt_for(tokens: int, nonce: str, instruction: str = "Reply with exactly: OK.") -> str:
+    """``tokens`` filler words behind an instruction.
+
+    The decoder arm must *not* use the short "reply OK" instruction: a healthy
+    model answers that in 2-3 tokens, which is churn but not a long decode. It
+    gets a task that runs to ``max_tokens`` instead.
+    """
     reps = max(1, tokens // 9)
-    return f"[disturb {nonce}] Reply with exactly: OK.\n" + FILLER * reps
+    return f"[disturb {nonce}] {instruction}\n" + FILLER * reps
+
+
+DECODER_TASK = (
+    "Count upward from 1, one number per line, and keep going until you run out "
+    "of room. Do not comment, do not summarise."
+)
 
 
 def stream_request(
@@ -212,7 +224,7 @@ def main() -> int:
             result = stream_request(
                 args.base_url,
                 args.model,
-                prompt_for(args.decoder_prompt_tokens, f"{nonce}-d{state['decoder_streams']}"),
+                prompt_for(args.decoder_prompt_tokens, f"{nonce}-d{state['decoder_streams']}", DECODER_TASK),
                 args.decoder_max_tokens,
                 None,
                 1800.0,
