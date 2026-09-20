@@ -30,6 +30,16 @@ Guards, so a stall is never confused with queueing or OOM:
   * stops firing new cycles once the decoder arm has been silent for
     ``--stall-after``, so a wedged engine does not accumulate queued requests
 
+``--sustain`` (terminal-wedge hunt): the wedge is a co-residency RACE, and every
+guard above RETREATS at the contention peak -- which is why the default run only
+ever produced the recoverable crawl, never a terminal deadlock. ``--sustain``
+disables the capacity/KV back-offs and the silence stop so contention is
+sustained THROUGH the peak (it still logs each event, and still honours the
+``--mem-guard-gb`` host-OOM stop, which is safety, not a wedge-dodge). The
+server-side watchdog then owns capture + the recovery-grace verdict; queued (not
+running) requests do not move the forward-progress counters, so piling them does
+not confuse the grace window. Use ONLY in a maintenance window.
+
 One JSON object per action on stdout. Exit 2 if a client-side stall was seen.
 """
 from __future__ import annotations
@@ -214,6 +224,13 @@ def main() -> int:
     ap.add_argument("--mem-guard-gb", type=float, default=1.2)
     ap.add_argument("--max-minutes", type=float, default=30.0)
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument(
+        "--sustain",
+        action="store_true",
+        help="terminal-wedge hunt: disable the capacity/KV back-offs and the "
+        "silence stop so contention is sustained through the peak (keeps the "
+        "host-OOM mem-guard). Maintenance window only.",
+    )
     args = ap.parse_args()
 
     if args.dry_run:
@@ -262,14 +279,19 @@ def main() -> int:
         if silent_for > args.stall_after_s:
             emit(event="client_stall_suspected", cycle=cycle, silent_for_s=round(silent_for, 1))
             stalled = True
-            break  # stop firing: do not pile requests onto a wedged engine
+            if not args.sustain:
+                break  # default: stop firing so a recoverable crawl can drain
+            # --sustain: keep firing THROUGH the peak. The server-side watchdog
+            # now owns capture + the recovery-grace verdict; queued (not running)
+            # requests do not advance the forward-progress counters, so piling
+            # them does not spoof recovery in the grace window.
 
         metrics = read_metrics(args.base_url)
-        if metrics.get("waiting_capacity", 0.0) > 0:
+        if not args.sustain and metrics.get("waiting_capacity", 0.0) > 0:
             emit(event="skip_capacity_backoff", cycle=cycle, metrics=metrics)
             time.sleep(60)
             continue
-        if metrics.get("kv_usage_perc", 0.0) > 0.9:
+        if not args.sustain and metrics.get("kv_usage_perc", 0.0) > 0.9:
             emit(event="skip_kv_backoff", cycle=cycle, metrics=metrics)
             time.sleep(60)
             continue
