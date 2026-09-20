@@ -48,6 +48,73 @@ device is idle while the host sits in a driver call (the hypothesis MiaAI-Lab
 recorded in `GLM-5.3-Flash-EXL3-2x-DGX-Sparks#128`), in which case this patch is
 not the fix and the allocator path is where to look.
 
+## 2026-09-20 — the SM% discriminator fired: `terminal_device_spin`, with a self-recovery caveat
+
+The instrument added earlier on 2026-09-20 (watchdog grace window + late GPU
+resample, logging_stack `a31d95b`) caught its first post-deploy terminal-class
+stall, and it was on the **production shape** — a ~275k-resident session continued
+after a long idle, i.e. one large prefill, not the synthetic 2-concurrent
+`disturb_wedge` load. Sequence:
+
+- freeze → `stall_suspected` / `stall_confirmed` (forward-progress probe timed
+  out); early GPU sample 96 % (the ambiguity zone); py-spy pin
+  `build_grouped_fat_tables` (`exl3.py:1353`), `in_collective=false`, NCCL
+  `only active collectives: 0`;
+- `grace_window_open` (600 s), during which the engine **micro-recovered**
+  (+39 combined tokens) then **re-froze**;
+- the re-freeze held the full window: **late GPU resample +300 s = 94 %,
+  +600 s = 96 %** (both pinned) → `stall_persists`, `outcome:
+  terminal_device_spin`.
+
+So the discriminator this doc describes finally produced a reading, and it is the
+**SM-pinned** one: the device is spinning, not host-blocked (`SM ~0`). That
+corroborates the barrier / co-residency reading over the MiaAI-Lab allocator
+hypothesis *for this event*, and it is the cell the cooperative-launch patch
+targets.
+
+**The caveat that keeps the toggle OFF.** The engine **self-recovered ~1–5 min
+after the 600 s verdict, with no cluster restart** — post-verdict token counters
+climbed from the wedged values (11.358 M → 13.341 M prompt) rather than resetting.
+Total spin ≈ 11–15 min. A permanently dead barrier does not self-clear, so the
+honest classification is a **long-but-recoverable device-spin**, not the permanent
+wedge this doc's opening describes (those — 2026-09-18 19:46 / 19:52 — needed an
+operator reboot). Consequences:
+
+1. The 600 s grace window is **too short**: it declared terminal at a boundary a
+   ~11–15 min spin overshoots. Either extend it or add a distinct
+   `terminal_device_spin_self_recovered` outcome that keeps sampling until real
+   recovery or a restart.
+2. Cooperative-launch fail-fast would convert *this* event from an ~11 min
+   self-heal into an immediate `cudaErrorCooperativeLaunchTooLarge`. Bounded
+   failure may beat an 11 min stall, but that is a different value proposition
+   than "cures a deadlock" — frame the trial that way.
+3. The confirm-first gate for the **permanent** wedge is still not satisfied by a
+   self-recovering event. Trial the `9a9c44f0…` cooperative-MoE overlay in a
+   maintenance window (overlay-OFF baseline first) against the real terminal
+   trigger before repinning.
+
+### A concurrency source the repro had not accounted for: the TTFT keep-alive
+
+The `repl` proxy runs a systemd timer (`sovereign-router-keepalive.timer`, every
+5 min) that fires one tiny worker-tier completion at the teacher to avoid the
+~40 s first-forward-after-idle stall. It is **meant** to be idle-gated
+(`scripts/teacher_keepalive.sh` skips when `cc_metrics.log` was touched within
+240 s), but that activity file went **stale for ~6 h across this window**
+(`idle_age` climbing 16 k → 22 k s in `keepalive.log`), so the gate never engaged
+and the ping fired **every 5 min through the disturb campaign and the wedge** — its
+`total` times (8.7 s, 19.7 s, 28.9 s, then a 90 s `rc=28` timeout against the
+wedged engine at 10:21:48Z) show it contending with live load, not pinging an idle
+one.
+
+Since the deadlock is **concurrency-gated, not length-gated** (`#22`: two
+concurrent requests, even small, is enough), an un-gated 5-min keep-alive is a
+standing second consumer that can supply the co-residency race — and it fires
+preferentially at the idle→active transition, which is exactly when a user resumes
+a session. This does **not** prove it caused any specific wedge (the dominant load
+here was the 275k prefill), but it is an **unaccounted concurrency source** that
+any repro or mitigation must control for. Fix the activity signal (or disable the
+timer) before attributing wedge frequency to user traffic alone.
+
 ## The patch
 
 `overlay/patch_exl3_cooperative_launch.py` rewrites the single launch call in
