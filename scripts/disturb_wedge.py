@@ -79,6 +79,7 @@ def stream_request(
     a number aborts mid-stream after that many seconds (the prefill arm), which
     closes the socket -- vLLM notices the disconnect and aborts the request.
     """
+    read_tick = max(1.0, min(5.0, timeout))
     payload = json.dumps(
         {
             "model": model,
@@ -102,10 +103,23 @@ def stream_request(
     aborted = False
     error = ""
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            for raw in resp:
+        # Read with a short tick instead of iterating the response, so the abort
+        # deadline is evaluated even while NO bytes are arriving. Iterating the
+        # stream only re-checks the window when a line lands -- which for a
+        # silent prefill means the "mid-prefill abort" would fire after the
+        # prefill had already finished (measured: 102.7 s for a 16.2 s window).
+        with urllib.request.urlopen(req, timeout=read_tick) as resp:
+            while True:
                 if read_window is not None and time.time() - started > read_window:
                     aborted = True
+                    break
+                try:
+                    raw = resp.readline()
+                except TimeoutError:
+                    continue  # no data yet; loop re-checks the deadline
+                except Exception:  # noqa: BLE001 - second timeout means the socket is unusable
+                    break
+                if not raw:
                     break
                 line = raw.decode("utf-8", "replace").strip()
                 if not line.startswith("data:"):
