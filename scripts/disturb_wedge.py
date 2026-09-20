@@ -79,7 +79,6 @@ def stream_request(
     a number aborts mid-stream after that many seconds (the prefill arm), which
     closes the socket -- vLLM notices the disconnect and aborts the request.
     """
-    read_tick = max(1.0, min(5.0, timeout))
     payload = json.dumps(
         {
             "model": model,
@@ -103,44 +102,44 @@ def stream_request(
     aborted = False
     error = ""
     try:
-        # Read with a short tick instead of iterating the response, so the abort
-        # deadline is evaluated even while NO bytes are arriving. Iterating the
-        # stream only re-checks the window when a line lands -- which for a
-        # silent prefill means the "mid-prefill abort" would fire after the
-        # prefill had already finished (measured: 102.7 s for a 16.2 s window).
-        with urllib.request.urlopen(req, timeout=read_tick) as resp:
-            while True:
-                if read_window is not None and time.time() - started > read_window:
-                    aborted = True
-                    break
-                try:
-                    raw = resp.readline()
-                except TimeoutError:
-                    continue  # no data yet; loop re-checks the deadline
-                except Exception:  # noqa: BLE001 - second timeout means the socket is unusable
-                    break
-                if not raw:
-                    break
-                line = raw.decode("utf-8", "replace").strip()
-                if not line.startswith("data:"):
-                    continue
-                body = line[5:].strip()
-                if body == "[DONE]":
-                    break
-                try:
-                    evt = json.loads(body)
-                except ValueError:
-                    continue
-                if evt.get("usage"):
-                    usage = evt["usage"]
-                for choice in evt.get("choices") or []:
-                    piece = (choice.get("delta") or {}).get("content")
-                    if piece:
-                        if first_content is None:
-                            first_content = time.time()
-                        chunks += 1
-                        if on_progress:
-                            on_progress(time.time())
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            if read_window is not None:
+                # Abort path: hold the connection open for the window WITHOUT
+                # reading, then leave the `with` (closing the socket). Iterating
+                # the stream instead re-checks the deadline only when a byte
+                # arrives, so a silent prefill was never aborted mid-flight
+                # (measured: a 16.2 s window produced a 102.7 s request, i.e. the
+                # disconnect landed after the prefill had finished).
+                delay = read_window - (time.time() - started)
+                if delay > 0:
+                    time.sleep(delay)
+                aborted = True
+            else:
+                # Decoder path: stream to completion. A short read tick is wrong
+                # here -- with a 5 s tick a first token at >5 s left the socket
+                # unusable, so every stream ended after 5 s with zero chunks and
+                # the stall guard then tripped on its own stale clock.
+                for raw in resp:
+                    line = raw.decode("utf-8", "replace").strip()
+                    if not line.startswith("data:"):
+                        continue
+                    body = line[5:].strip()
+                    if body == "[DONE]":
+                        break
+                    try:
+                        evt = json.loads(body)
+                    except ValueError:
+                        continue
+                    if evt.get("usage"):
+                        usage = evt["usage"]
+                    for choice in evt.get("choices") or []:
+                        piece = (choice.get("delta") or {}).get("content")
+                        if piece:
+                            if first_content is None:
+                                first_content = time.time()
+                            chunks += 1
+                            if on_progress:
+                                on_progress(time.time())
     except Exception as exc:  # noqa: BLE001 - timeout/reset both mean no progress
         error = f"{type(exc).__name__}: {exc}"
     return {
