@@ -83,7 +83,8 @@ operator reboot). Consequences:
 1. The 600 s grace window is **too short**: it declared terminal at a boundary a
    ~11–15 min spin overshoots. Either extend it or add a distinct
    `terminal_device_spin_self_recovered` outcome that keeps sampling until real
-   recovery or a restart.
+   recovery or a restart. **(RESOLVED 2026-09-20 — see the next subsection:
+   device-spin extension, logging_stack `1d603f4`, deployed + verified live.)**
 2. Cooperative-launch fail-fast would convert *this* event from an ~11 min
    self-heal into an immediate `cudaErrorCooperativeLaunchTooLarge`. Bounded
    failure may beat an 11 min stall, but that is a different value proposition
@@ -114,6 +115,37 @@ a session. This does **not** prove it caused any specific wedge (the dominant lo
 here was the 275k prefill), but it is an **unaccounted concurrency source** that
 any repro or mitigation must control for. Fix the activity signal (or disable the
 timer) before attributing wedge frequency to user traffic alone.
+
+### 2026-09-20 (later) — a second self-recovering device-spin, and the grace window extended
+
+A second stall the same day (~11:27–11:34Z, the same 275k session resumed warm)
+reproduced the pattern and sharpened it. The py-spy pin this time was
+`apply_exl3_fused_moe` (`exl3.py:1655`) with **`in_launch=true`** — caught *inside*
+the fused-MoE `cudaLaunchKernel` at `exl3_moe.cu:290`, the exact site this patch
+rewrites, rather than the fat-table builder. The grace window resampled **+300 s =
+93 % SM (pinned)** and the engine then **self-recovered at 424 s** (a re-prefill
+burst, `prompt throughput 19,896 t/s`, prefix hit ~46 %). So there are now **two**
+independent `pinned + self-recovers` captures (94–96 % and 93 %), both released
+without a restart — the device-spin arm is real but *releasing*, and there is still
+**zero** `pinned + no-recovery` (permanent) capture under the late-sample instrument.
+
+**Consequence #1 above is now fixed** (logging_stack `1d603f4`, deployed to gb10 +
+verified live in the `watchdog_start` config). When the 600 s grace window expires
+with SM pinned, the watchdog no longer declares terminal at that edge: it holds a
+bounded **device-spin extension** (`RECOVERY_DEVICE_SPIN_EXTEND_S`, default 1200 s →
+up to 30 min total) that keeps sampling counters and a coarse GPU trajectory, and
+splits three ways —
+
+- counters resume → `stall_recovered` with `outcome=device_spin_self_recovered` (no restart);
+- extension also expires still pinned → `terminal_device_spin` (the genuine `pinned + no-recovery` cell — the only one that justifies the overlay/patch);
+- extension expires with SM decayed to ~0 → reclassified `terminal_host_block`.
+
+Host-block and unknown still escalate at the 600 s edge (waiting buys nothing). New
+event `device_spin_extend_open`; `stall_recovered` now carries `outcome` +
+`recovered_after_s`; 19 offline tests green. This closes the false-terminal that
+mislabeled the first 2026-09-20 capture, so a terminal-repro now classifies
+honestly: **only an extension that *also* expires pinned** is the confirm-first datum
+the overlay trial waits on.
 
 ## The patch
 
