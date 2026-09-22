@@ -1,7 +1,19 @@
 # EXL3 MoE Wedge — A/B Investigation (2026-09-21, final)
 
-**Status:** Arm B closed (negative). Launch-atomicity lead retired. Root cause not yet
-confirmed; leading hypothesis is a two-rank collective desync cleared by a ~480 s timeout.
+> **2026-09-22 UPDATE — root cause reframed by upstream issue [#22]; the desync hypothesis
+> (§6) is REFUTED.** An operator on an independent 2×GB10 pair captured *all three processes
+> including both worker ranks simultaneously* during the identical ~260 k stall: both ranks
+> sit at the same instant in `build_grouped_fat_tables` / `apply_exl3_grouped_fat` with **no
+> NCCL frames on either rank** — a two-rank-*symmetric* host-side spin, not one rank waiting
+> on the other. The wedge is the **stock EXL3 fat-grouped prefill path contending the single
+> per-device split-K lock buffer** under concurrency + long prefill — the same
+> "one-lock-buffer-per-device" hazard as the now-fixed shared-experts-stream deadlock, reached
+> by a different route. See the new **§10** below; §1–§9 are preserved as the 2026-09-21
+> record. [#22]: https://github.com/MiaAI-Lab/DeepSeek-v4.1-Flash-EXL3-2x-DGX-Sparks/issues/22
+
+**Status (2026-09-21, superseded by §10):** Arm B closed (negative). Launch-atomicity lead
+retired. Root cause not yet confirmed; leading hypothesis is a two-rank collective desync
+cleared by a ~480 s timeout.
 
 **One-line verdict:** The cooperative-launch fix does nothing to the wedge, the wedge is
 *not* a single-kernel deadlock and *not* driver OOM — it is a **whole-engine
@@ -84,7 +96,11 @@ different stalls ⇒ recovery is **external/timeout-driven**, not kernel self-he
   value is a sampling artifact (60 s grace cadence bucketing recovery at the 480 s tick).
   Unresolved — resolve by setting the timeout explicitly and seeing if recovery time moves.
 
-## 6. Leading hypothesis — two-rank collective desync
+## 6. Leading hypothesis — two-rank collective desync  ⚠️ REFUTED (see §10)
+
+> Refuted 2026-09-22 by upstream #22's simultaneous both-rank capture: the stall is
+> two-rank-*symmetric* at a host-side fat-table function with **no NCCL frames on either
+> rank**, which is the opposite of one rank waiting on a collective. Kept for the record.
 
 A spin-with-no-progress that lands on *different* kernels and clears on a *fixed* timeout is
 the classic profile of one rank waiting on the other. The head rank spins (sometimes in a
@@ -115,10 +131,15 @@ diagnosing half the system.
 
 ## 9. Next actions (prioritized)
 
-1. **Arm worker-rank capture** so the next stall snapshots *both* ranks. This is the one
-   instrument that can confirm/kill the desync hypothesis. Blocker: no `ssh` in the watchdog
-   container → mount a key, or add a host-side capture hook that `nsenter`/`py-spy`s the
-   worker container from the worker host.
+> **2026-09-22:** item 1 is **done and superseded** — worker capture was armed
+> (`vllm-watchdog:ssh`, `worker_capture:true`, verified live) *and* the both-rank capture now
+> exists upstream (#22), which killed the desync hypothesis it was meant to test. The live
+> priority is now the **Mode-2 per-device-lock-buffer** thread in §10, not more captures.
+
+1. ~~**Arm worker-rank capture** so the next stall snapshots *both* ranks.~~ **DONE** (key
+   mounted at `/keys/worker_capture`, forced-command on kgb10) **+ superseded by #22's
+   both-rank capture.** This is the one instrument that can confirm/kill the desync
+   hypothesis — and it did: refuted, see §10.
 2. **Nail the 480 s clock:** set `TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC` explicitly (e.g. 300 s)
    and check whether recovery time tracks it. If yes → NCCL heartbeat confirmed → collective
    desync all but proven.
@@ -130,6 +151,81 @@ diagnosing half the system.
 
 `CUDA_LAUNCH_BLOCKING=1` drops down the list: it answers "which kernel is slow," but if the
 head is slow because it is *waiting on the peer*, that is the wrong question.
+
+## 10. Upstream #22 reframe — the per-device EXL3 lock buffer (2026-09-22)
+
+Upstream issue [#22] ("Two concurrent requests deadlock the pair, 2×GB10 TP=2", closed
+2026-09-22) resolves most of this investigation and splits what we called "the wedge" into
+**two distinct modes**.
+
+### Mode 1 — shared-experts-stream lock corruption (root-caused; **we are already immune**)
+`DSV41_EXL3_SERIAL_STREAMS=1` only nulls the *model's* `aux_stream_list`. vLLM's MoE
+**shared-experts** runner takes a *separate* process-global stream
+(`vllm/utils/torch_utils.py::aux_stream()`, placed on the GEMM in
+`fused_moe/runner/shared_experts.py`, gated by `VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD`,
+default 256 → every decode qualifies). The shared-expert EXL3 GEMM on that aux stream races
+the routed EXL3 MoE on the main stream and they corrupt each other's split-K tile locks —
+the documented one-lock-buffer-per-device constraint, on a stream the recipe's patch cannot
+see. Symptom: two concurrent *short* requests deadlock, `shm_broadcast` 60 s timeout,
+EngineCore force-killed, HTTP 500 at 243 s. **Fix = `VLLM_DISABLE_SHARED_EXPERTS_STREAM=1`**
+(plain vLLM env, default `False`). Our live `.env` already sets it → our earlier 5-way decode
+burst does not wedge. Narrower lever: `VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD=0`.
+
+### Mode 2 — fat-grouped prefill spin (**still open = our remaining wedge**)
+Reproduced by the operator *with the Mode-1 fix in place*, via **two concurrent cold ~260 k
+prefills** — our exact trigger lane (§7). They captured all three processes, **both worker
+ranks at the same instant**:
+
+- **EngineCore** host-spin: `sched_yield ← shm_broadcast.wait ← acquire_read ← get_response`
+  (`multiproc_executor.py:433`) — waiting on the workers.
+- **Worker_TP0 and Worker_TP1, same instant:** `build_grouped_fat_tables` (`exl3.py:1354/1349`)
+  under `apply_exl3_grouped_fat` (`1408`). **No NCCL frames on either rank.** GPU 96 % util
+  spin (not progress). Freeze cycles ~3.5–4.5 min, self-clear, engine never dies.
+
+**Mechanism, grounded in `overlay/exl3.py`.** With `EXL3_FAT_GROUPED=1`
+(`_exl3_fat_effective_tier == "grouped"`), the large-prefill branch (`apply_exl3_fused_moe`,
+lines 1690–1708) is deliberately **host-sync-free / graph-capturable**: it launches the thin
+fused `exllamav3_ext.exl3_moe` kernel *and* `apply_exl3_grouped_fat` (which fires
+`exl3_fat_moe_gather/gateup/down`) and returns with **no `.item()`**. So on our config there
+is no host sync to hang on — the *device* wedges and the host thread parks launching the
+sync-free `build_grouped_fat_tables` device ops (`searchsorted`/`cumsum`/`index_select`)
+against a saturated queue. That is exactly the captured pin. The overlay does **no**
+request-level serialization of EXL3 launches (grep: only `_stage_counts_to_host`'s side
+stream, unused on the grouped path); concurrency safety rests entirely on the native `.so`'s
+**single per-device split-K lock buffer**, which tolerates only one EXL3 GEMM family per
+device at a time. Under `MAX_NUM_SEQS>1` + long prefill, two requests' fat-expert MoE work
+becomes device-co-resident and contends that one lock buffer → symmetric spin on both ranks.
+The `EXL3_FAT_GROUPED=0` fallback makes the same wedge *visible* as the host sync
+`int(counts.max().item())` (line 1736) / `count_stream.synchronize()` (1728) "that never
+returns", because there the host explicitly waits on the wedged device.
+
+This also **corrects §8**, which prematurely "ruled out" the fat-grouped kernels as
+co-residency-free: the *Python* grouped path is host-sync-free, but the *device* fat kernels
+still share the per-device lock buffer, so they are the co-residency exposure, not the
+exception to it. And it **re-confirms §2–§3**: the wedge is stock upstream code, independent
+of our cooperative-MoE overlay (which only routes thin/decode launches).
+
+### What this changes for us
+- The risky local reproduction (deliberate ~8-min freeze) to "capture the worker" (§9.1) is
+  **no longer needed** — the both-rank capture exists upstream. Our own worker-capture arming
+  (`vllm-watchdog:ssh`, `worker_capture:true`) is verified live and stays as a safety net.
+- **Our exposure:** live `.env` = `EXL3_FAT_GROUPED=1`, `EXL3_FUSED_MOE=1`,
+  `EXL3_TEMP_ROWS_FUSED=16`, `MAX_NUM_SEQS=3` → on the Mode-2 path with concurrency enabled;
+  `VLLM_DISABLE_SHARED_EXPERTS_STREAM=1` (immune to Mode 1); `LANGUAGE_MODEL_ONLY=1`
+  (vision off → not exposed to the #28 encoder-cache livelock); `MAX_NUM_BATCHED_TOKENS=1024`
+  (tightest per #19; 1536 would likely gain head headroom, restart-gated).
+- **No upstream PR fixes Mode 2** (Mode 1 was resolved by operators setting the env, not
+  code). The real fix is native: make the split-K lock buffer per-invocation, or serialize
+  EXL3 GEMM families per device. Cheap operational mitigations to test (no code): force
+  `MAX_NUM_SEQS=1` (kills the co-residency, at a concurrency cost), or gate concurrent long
+  prefills so two fat-expert passes never overlap.
+
+### Candidate confirmations (do not require inducing a full freeze locally)
+1. Ask the operator (offered) for the full forensic write-up and the
+   `EXL3_FAT_GROUPED=0` / `EXL3_TEMP_ROWS_FUSED` sweep they volunteered.
+2. If we do use a maintenance window: `MAX_NUM_SEQS=1` should make the ~260 k×2 stall vanish
+   (positive control for the co-residency mechanism); an `EXL3_TEMP_ROWS_FUSED` bump changes
+   the fat/thin boundary and should move the onset.
 
 ## Appendix — verification commands
 
