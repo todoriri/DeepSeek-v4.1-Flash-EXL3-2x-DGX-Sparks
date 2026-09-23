@@ -62,8 +62,8 @@ with any earlier prompt via `/tokenize` (ideal reuse); `short` = lcp − cached.
 |---|---:|---:|---:|---:|---:|---:|
 | append (6 turns) | 11 | 222,287 | 219,520 | 98.8% | 1,932 | 0 |
 | fork (back to turn 2) | 1 | 18,791 | 18,688 | 99.5% | 103 | 0 |
-| interleave A | 5 | 86,100 | 85,376 | 99.1% | 403 | 0 |
-| interleave B | 5 | 85,839 | 83,584 | 97.3% | 1,931 | 0 |
+| interleave A | 5 | 86,100 | 85,376 | 99.2% | 403 | 0 |
+| interleave B | 5 | 85,839 | 83,584 | 97.4% | 1,931 | 0 |
 | thinking on | 5 | 85,475 | 82,432 | 96.4% | 2,458 | 0 |
 
 (The first request of each session is cold by construction; its ~30-token overlap
