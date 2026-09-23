@@ -56,10 +56,14 @@ Per node, from `scripts/weight_budget.py --tp 2`:
 | Context workspaces, CUDA context + NCCL, CUDA graphs | ~5–7 |
 | vLLM processes, OS, docker, desktop | ~9 |
 
-Shipped defaults: `MAX_MODEL_LEN=600000`, `MAX_NUM_SEQS=2`, `MAX_NUM_BATCHED_TOKENS=1024`, a
-2.5 GiB KV pool (774,400 tokens at 614400 ctx). That leaves the head **4.07–4.21 GiB**
-`MemAvailable` after warm-up; its real floor comes during a long *prefill*, not at boot —
-**2.1 GiB** at the end of a 601k prompt.
+Shipped defaults: `MAX_MODEL_LEN=600000`, `MAX_NUM_SEQS=2`,
+`MAX_NUM_BATCHED_TOKENS=1536`, `DSV41_IO_THREADS=96`, and a 2.5 GiB KV pool. The
+1536/96 pair is the measured agent-workload setting; the previous 1024/32 pair
+remains an easy low-resource override. The head has about **5.9 GiB**
+`MemAvailable` after a 34k agent replay. Its real floor comes during a long
+*prefill*, not at boot; the previous 1024-token chunk reached **2.1 GiB** at the
+end of a 601k prompt, while the new 1536 default has not yet been revalidated at
+that extreme length.
 
 `start.sh` enforces the rest: a boot-margin preflight, per-prefill allocator release, and a
 post-load page-cache drop. Engram tables are never pinned — the row store replaces vLLM's
@@ -142,7 +146,7 @@ the worker is short of disk.
 | Source | Into | Size |
 |---|---|---:|
 | [`Mia-AiLab/DeepSeek-V4.1-Flash-EXL3-2.9bpw`](https://huggingface.co/Mia-AiLab/DeepSeek-V4.1-Flash-EXL3-2.9bpw) — 39 EXL3 shards | `MODEL_HOST` (`./model`) | ~197 GiB |
-| [`deepseek-ai/DeepSeek-V4.1-Flash`](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash) — shards **47+48 and the index only** | `ENGRAM_DIR` (`./engram-src`) | ~190 GiB |
+| [`deepseek-ai/DeepSeek-V4.1-Flash`](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash) — shards **47+48**, index, and `config.json` only | `ENGRAM_DIR` (`./engram-src`) | ~190 GiB |
 
 Engram tables are never quantized and never copied into the EXL3 tree, which is
 why they come from the original checkpoint; the other 46 shards are never read.
@@ -293,7 +297,7 @@ higher) and restart.
 | Path | Role |
 |---|---|
 | `model/` | EXL3 2.9 bpw checkpoint (this workspace) |
-| `ENGRAM_DIR` | Engram tables: shards 47+48 + index of the original `DeepSeek-V4.1-Flash` (`./engram-src`, auto-fetched) |
+| `ENGRAM_DIR` | Engram tables: shards 47+48 + index + config of the original `DeepSeek-V4.1-Flash` (`./engram-src`, auto-fetched) |
 | `start.sh` | 2-node launcher (`start` / `share` / `pack` / `stop` / `restart` / `status` / `logs`) |
 | `Dockerfile` | `vllm-openai:deepseekv41-flash-0909` + SM121 EXL3 ext + the overlay |
 | `overlay/exl3.py` | Packed mul1 loader + apply: routed MoE, attn/shared/engram wkv linears, pinned H2D staging, pre-tune |
@@ -378,8 +382,8 @@ Then set `WEIGHT_SYNC=zfs` **in `.env`** and run `./start.sh`.
 > in it. Knobs absent from `.env` (`BUILD`, `PULL`, `SKIP_BUILD`, `SKIP_PULL`,
 > `SKIP_SHIP`, `SKIP_SYNC`, `FORCE_SYNC`) do work as one-shot prefixes.
 
-Populate `models/dsv41-engram` with shards 47+48 and the index only — never
-send the 476 GiB native tree. Override `ZFS_POOL` and the four dataset names in
+Populate `models/dsv41-engram` with shards 47+48, the index, and `config.json`
+only — never send the 476 GiB native tree. Override `ZFS_POOL` and the four dataset names in
 `.env`; `start.sh` falls back to the streaming path if the pool or the worker's
 `zfs recv` is not reachable. `WEIGHT_SYNC=rsync` is the third option: a plain
 node-local copy with no pool, and no incremental updates.
@@ -397,6 +401,23 @@ the one-time ~8.5 min pack; later boots detect the shards and skip. Set
 `DSV41_AUTO_PACK=1` to force (fail if a node is short of disk), or `=0` to keep
 the old manual-only behaviour.
 
+## Agent prefix caching
+
+Both ranks default to `PREFIX_CACHE_RETENTION_INTERVAL=4096`, passed explicitly
+as `--prefix-cache-retention-interval`. Periodic hybrid-cache checkpoints avoid
+zero-hit alignment cliffs observed with the image's latest-boundary-only default,
+and improve the opportunities for append-only sessions and earlier forks to reuse
+state. Existing `.env` files inherit the new default on their next restart.
+
+This uses the existing KV pool, not extra reserved GPU memory. Checkpoints remain
+evictable and are not a pinned per-session tree. More retained state trades cache
+competition/bookkeeping for reuse; compaction that rewrites the prefix still needs
+new prefill. Set `PREFIX_CACHE_RETENTION_INTERVAL=0` to restore the previous policy.
+Use this knob rather than duplicating the flag in `EXTRA_ARGS`.
+
+See [prefix-cache retention](docs/prefix-cache-retention.md) for the reproduction,
+configuration validation, operational limits, and deployment checks.
+
 ## CX7
 
 Pins on this pair: spark1 `enp1s0f1np1`/`rocep1s0f1` ↔
@@ -411,6 +432,7 @@ Host-side (pure source/JSON checks — no torch, no vLLM):
 ```bash
 python3 tests/test_numeric_config.py
 python3 tests/test_engram_src.py
+python3 tests/test_responses_content_types.py
 python3 tests/test_engram_secondary.py
 python3 tests/test_k_map.py
 python3 tests/test_memory_log.py
@@ -506,10 +528,14 @@ drops to 23 tok/s but ×4 reaches **53.7 aggregate** — batch serving wants spe
 **Prefill, short prompts**: **1,041 / 1,008 / 965 tok/s** at 10k / 28k / 57k with the packed
 Engram shards (`./start.sh pack`, `DSV41_IO_THREADS=96`) and the E3 v2 grouped kernels
 (`EXL3_FAT_GROUPED=1`, `EXL3_TEMP_ROWS_FUSED=16`), at a 1536-token chunk. Run-to-run spread is
-about 10 %.
+about 10 %. On the current two-Spark lane, the same defaults measured **1,338 tok/s** on
+sparkDash's repetitive 32k prefill and **995 tok/s** median on a realistic 34,357-token Pi
+agent replay (three runs, 0 prefix-cache hits), up from 760 tok/s at 1024/32; median TTFT fell
+45.3 -> 34.6 s.
 
 **Prefill, long prompts** (`expandable_segments:True`, **2048**-token chunks,
-`LONG_PREFILL_TOKEN_THRESHOLD=1792`, single request):
+`LONG_PREFILL_TOKEN_THRESHOLD=1792`, single request). The shipped chunk is now 1536, with
+long-prefill fairness disabled by default; these numbers describe the older configuration:
 
 | Prompt | TTFT | tok/s | Steady-state decode at that context |
 |---:|---:|---:|---:|
@@ -523,9 +549,9 @@ Two fresh 100k prompts at once: 973 tok/s aggregate. A 17-token chat sent into a
 prefill answers in **3.6 s**. Head `MemAvailable` 4.07–4.21 GiB after warm-up, low-water
 2.56 GiB at 455k and 2.1 GiB at 601k; worker 5.8 GiB.
 
-At the **shipped 1536-token chunk** with images on, head low-water is *higher* than the
-2048-chunk run above — a larger chunk finishes the prefill in fewer scheduler passes, which
-more than pays for the bigger per-chunk activation.
+Upstream's **1536-token chunk** check with images on reported 2.9 GiB head `MemAvailable`
+after a 450k prompt. This is separate from the text-only agent replay above and does not
+revalidate the combined 1536/96, fairness-disabled defaults at 600k.
 
 **Optional cooperative MoE** (same pair, not the default overlay): see the table under
 Quick start. Stock numbers in this section are the shipped fused-MoE path.

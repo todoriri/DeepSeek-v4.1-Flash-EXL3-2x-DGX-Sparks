@@ -147,18 +147,24 @@ DSPARK_TOKENS="${DSPARK_TOKENS:-5}"
 KV_CACHE_DTYPE="${KV_CACHE_DTYPE:-}"
 # 64-token KV blocks on GB10 (SM12x DeepGEMM paged indexer: 32/64 states per block).
 KV_BLOCK_SIZE="${KV_BLOCK_SIZE:-64}"
+# Preserve periodic hybrid-cache checkpoints for agent continuations and forks.
+# The image defaults to 0 (latest reachable boundaries only), which can miss
+# completely when the DSpark block-drop guard needs an earlier checkpoint.
+PREFIX_CACHE_RETENTION_INTERVAL="${PREFIX_CACHE_RETENTION_INTERVAL-4096}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-600000}"
 GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.88}"
 MAX_NUM_SEQS="${MAX_NUM_SEQS:-2}"
-# 2048: the prefill chunk bounds the activation peak (indexer scores every
-# chunk row against the whole prefix). 4096 was the 2026-09-11 setting.
-MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-2048}"
+# 1536: measured agent-workload sweet spot; the prefill chunk bounds the
+# activation peak because the indexer scores every chunk row against the whole
+# prefix. 2048 is the older long-context setting.
+MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-1536}"
 CHAT_TEMPLATE_HOST="${CHAT_TEMPLATE_HOST:-$SCRIPT_DIR/files/chat_template.jinja}"
 CHAT_TEMPLATE="${CHAT_TEMPLATE:-/opt/dsv41/chat_template.jinja}"
 STOP_PATCH_HOST="${STOP_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_suppress_stops_in_reasoning.py}"
 SCHED_PATCH_HOST="${SCHED_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_scheduler_decode_floor.py}"
 XGRAMMAR_PATCH_HOST="${XGRAMMAR_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_xgrammar_termination.py}"
 SPINWAIT_PATCH_HOST="${SPINWAIT_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_spinwait.py}"
+RESPONSES_PATCH_HOST="${RESPONSES_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_responses_content_types.py}"
 EXL3_OVERLAY_HOST="${EXL3_OVERLAY_HOST:-$SCRIPT_DIR/overlay/exl3.py}"
 KMAP_HOST="${KMAP_HOST:-$SCRIPT_DIR/files/exl3_k_map.json}"
 QUANTIZATION="${QUANTIZATION:-exl3}"
@@ -211,7 +217,7 @@ MODEL_HOST="${MODEL_HOST:-$SCRIPT_DIR/model}"
 ENGRAM_DIR="${ENGRAM_DIR:-$SCRIPT_DIR/engram-src}"
 # Hub sources. The EXL3 weights are ours; the Engram tables are never
 # quantized and never copied into the EXL3 tree, so they come from the
-# original DeepSeek checkpoint (shards 47+48 and the index only).
+# original DeepSeek checkpoint (shards 47+48, the index, and config.json only).
 HF_MODEL_REPO="${HF_MODEL_REPO:-Mia-AiLab/DeepSeek-V4.1-Flash-EXL3-2.9bpw}"
 HF_ENGRAM_REPO="${HF_ENGRAM_REPO:-deepseek-ai/DeepSeek-V4.1-Flash}"
 # 1 = fetch whatever is missing before preflight checks it. 0 = only verify.
@@ -267,7 +273,7 @@ ENGRAM_MOUNT="${ENGRAM_MOUNT:-/engram-src}"
 # recipe; raise only after a clean boot shows headroom.
 DSV41_CACHE_GIB="${DSV41_CACHE_GIB:-0}"
 DSV41_RESIDENT_SCALES="${DSV41_RESIDENT_SCALES:-0}"
-DSV41_IO_THREADS="${DSV41_IO_THREADS:-32}"
+DSV41_IO_THREADS="${DSV41_IO_THREADS:-96}"
 DSV41_CACHE_WAYS="${DSV41_CACHE_WAYS:-4}"
 DSV41_STATS_SECONDS="${DSV41_STATS_SECONDS:-60}"
 # Host memory guard: kill the local container when MemAvailable drops under
@@ -355,6 +361,26 @@ _glm53_validate_spinwait_ms() {
         GLM53_SPINWAIT_MS "$GLM53_SPINWAIT_MS" 1000
 }
 
+_dsv41_validate_prefix_retention() {
+    local value="${PREFIX_CACHE_RETENTION_INTERVAL-4096}"
+    if ! [[ "$value" =~ ^[0-9]+$ ]]; then
+        echo "PREFIX_CACHE_RETENTION_INTERVAL must be 0 or a positive multiple of 128 (got: $value)" >&2
+        return 2
+    fi
+    while [ "${value#0}" != "$value" ]; do value="${value#0}"; done
+    value="${value:-0}"
+    if [ "${#value}" -gt 7 ] || [ "$value" -gt 1048576 ] || (( value % 128 != 0 )); then
+        echo "PREFIX_CACHE_RETENTION_INTERVAL must be 0 or a multiple of 128 up to 1048576 (got: $value)" >&2
+        return 2
+    fi
+    if [[ " ${EXTRA_ARGS:-} " =~ [[:space:]]--prefix-cache-retention-interval([[:space:]=]|$) ]]; then
+        echo "Set PREFIX_CACHE_RETENTION_INTERVAL instead of duplicating --prefix-cache-retention-interval in EXTRA_ARGS" >&2
+        return 2
+    fi
+    PREFIX_CACHE_RETENTION_INTERVAL="$value"
+    export PREFIX_CACHE_RETENTION_INTERVAL
+}
+
 validate_numeric_config() {
     if ! [[ "$GPU_MEM_UTIL" =~ ^(0([.][0-9]+)?|[.][0-9]+|1([.]0+)?)$ ]] \
        || ! awk -v u="$GPU_MEM_UTIL" 'BEGIN { exit !(u > 0 && u <= 1) }'; then
@@ -367,6 +393,7 @@ validate_numeric_config() {
     _glm53_validate_enum GLM53_INDEXER_WORKSPACE "${GLM53_INDEXER_WORKSPACE-stock}" \
         stock rightsize || return
     _glm53_validate_spinwait_ms || return
+    _dsv41_validate_prefix_retention || return
 }
 # GLM53 numeric config guard (end)
 
@@ -433,12 +460,14 @@ hf_fetch() {
         || die "download of ${label} from ${repo} failed (re-run ./start.sh to resume, or fetch by hand into ${dest})"
 }
 
-# Engram needs only shards 47+48 of the 48-shard original (~95 GiB each) plus
-# the index; the other 46 are never read. Do not pull the whole 476 GiB repo.
+# Engram needs only shards 47+48 of the 48-shard original (~95 GiB each), the
+# index, and config.json; the other 46 shards are never read. Do not pull the
+# whole 476 GiB repo.
 ENGRAM_FILES=(
     "model-00047-of-00048.safetensors"
     "model-00048-of-00048.safetensors"
     "model.safetensors.index.json"
+    "config.json"
 )
 
 engram_complete() {
@@ -545,6 +574,7 @@ preflight() {
     [ -f "$SCHED_PATCH_HOST" ] || die "$SCHED_PATCH_HOST missing"
     [ -f "$XGRAMMAR_PATCH_HOST" ] || die "$XGRAMMAR_PATCH_HOST missing"
     [ -f "$SPINWAIT_PATCH_HOST" ] || die "$SPINWAIT_PATCH_HOST missing"
+    [ -f "$RESPONSES_PATCH_HOST" ] || die "$RESPONSES_PATCH_HOST missing"
     [ -f "$EXL3_OVERLAY_HOST" ] || die "$EXL3_OVERLAY_HOST missing"
     [ -f "$KMAP_HOST" ] || die "$KMAP_HOST missing"
     [ -f "$CHAT_TEMPLATE_HOST" ] || die "$CHAT_TEMPLATE_HOST missing"
@@ -1142,6 +1172,7 @@ ARGS=(
     --tensor-parallel-size "${TP}"
     --nnodes "${NNODES}"
     --node-rank 0
+    --prefix-cache-retention-interval "${PREFIX_CACHE_RETENTION_INTERVAL}"
     --master-addr "${HEAD_IP}"
     --master-port "${MASTER_PORT}"
     --distributed-executor-backend mp
@@ -1150,6 +1181,7 @@ ARGS=(
     --reasoning-parser deepseek_v41
     --enable-auto-tool-choice
     --enable-prefix-caching
+    --enable-prompt-tokens-details
     --no-enable-flashinfer-autotune
     --hf-overrides "{\"engram_table_dir\":\"${ENGRAM_MOUNT}\"}"
 )
@@ -1198,6 +1230,7 @@ for p in /opt/dsv41/patch_suppress_stops_in_reasoning.py \
          /opt/dsv41/patch_scheduler_decode_floor.py \
          /opt/dsv41/patch_xgrammar_termination.py \
          /opt/dsv41/patch_spinwait.py \
+         /opt/dsv41/patch_responses_content_types.py \
          /opt/dsv41/patch_exl3_packed_names.py \
          /opt/dsv41/patch_exl3_lm_head.py \
          /opt/dsv41/patch_engram_secondary.py \
@@ -1237,6 +1270,7 @@ ARGS=(
     --tensor-parallel-size "${TP}"
     --nnodes "${NNODES}"
     --node-rank 1
+    --prefix-cache-retention-interval "${PREFIX_CACHE_RETENTION_INTERVAL}"
     --master-addr "${HEAD_IP}"
     --master-port "${MASTER_PORT}"
     --distributed-executor-backend mp
@@ -1246,6 +1280,7 @@ ARGS=(
     --reasoning-parser deepseek_v41
     --enable-auto-tool-choice
     --enable-prefix-caching
+    --enable-prompt-tokens-details
     --no-enable-flashinfer-autotune
     --hf-overrides "{\"engram_table_dir\":\"${ENGRAM_MOUNT}\"}"
 )
@@ -1292,6 +1327,7 @@ for p in /opt/dsv41/patch_suppress_stops_in_reasoning.py \
          /opt/dsv41/patch_scheduler_decode_floor.py \
          /opt/dsv41/patch_xgrammar_termination.py \
          /opt/dsv41/patch_spinwait.py \
+         /opt/dsv41/patch_responses_content_types.py \
          /opt/dsv41/patch_exl3_packed_names.py \
          /opt/dsv41/patch_exl3_lm_head.py \
          /opt/dsv41/patch_engram_secondary.py \
@@ -1382,6 +1418,7 @@ launch_cluster() {
     scp -q -o BatchMode=yes "$SCHED_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_scheduler_decode_floor.py"
     scp -q -o BatchMode=yes "$XGRAMMAR_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_xgrammar_termination.py"
     scp -q -o BatchMode=yes "$SPINWAIT_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_spinwait.py"
+    scp -q -o BatchMode=yes "$RESPONSES_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_responses_content_types.py"
     scp -q -o BatchMode=yes "$EXL3_OVERLAY_HOST" "${WORKER_SSH}:/tmp/dsv41-exl3.py"
     scp -q -o BatchMode=yes "$KMAP_HOST" "${WORKER_SSH}:/tmp/exl3_k_map.json"
     scp -q -o BatchMode=yes "$SCRIPT_DIR/overlay/patch_exl3_packed_names.py" "${WORKER_SSH}:/tmp/patch_exl3_packed_names.py"
@@ -1506,7 +1543,7 @@ launch_cluster() {
     local v
     for v in SERVED_MODEL_NAME PORT TP NNODES HEAD_IP MASTER_PORT QUANTIZATION \
              MAX_MODEL_LEN GPU_MEM_UTIL MAX_NUM_SEQS MAX_NUM_BATCHED_TOKENS \
-             KV_CACHE_DTYPE SPEC_METHOD DSPARK_TOKENS \
+             KV_CACHE_DTYPE SPEC_METHOD DSPARK_TOKENS PREFIX_CACHE_RETENTION_INTERVAL \
              LANGUAGE_MODEL_ONLY SKIP_MM_PROFILING \
              LIMIT_MM CHAT_TEMPLATE ENFORCE_EAGER EXL3_FUSED_MOE EXL3_MOE_ROW_TILE \
              EXL3_TEMP_ROWS_FUSED EXL3_FAT_SORTED EXL3_FAT_BATCHED EXL3_FAT_KERNEL \
@@ -1551,6 +1588,7 @@ launch_cluster() {
         -v '/tmp/patch_scheduler_decode_floor.py:/opt/dsv41/patch_scheduler_decode_floor.py:ro' \
         -v '/tmp/patch_xgrammar_termination.py:/opt/dsv41/patch_xgrammar_termination.py:ro' \
         -v '/tmp/patch_spinwait.py:/opt/dsv41/patch_spinwait.py:ro' \
+        -v '/tmp/patch_responses_content_types.py:/opt/dsv41/patch_responses_content_types.py:ro' \
         -v '/tmp/dsv41-exl3.py:/opt/dsv41/exl3.py:ro' \
         -v '/tmp/exl3_k_map.json:/opt/dsv41/exl3_k_map.json:ro' \
         -v '/tmp/patch_exl3_packed_names.py:/opt/dsv41/patch_exl3_packed_names.py:ro' \
@@ -1590,6 +1628,7 @@ launch_cluster() {
         -v "$SCHED_PATCH_HOST:/opt/dsv41/patch_scheduler_decode_floor.py:ro" \
         -v "$XGRAMMAR_PATCH_HOST:/opt/dsv41/patch_xgrammar_termination.py:ro" \
         -v "$SPINWAIT_PATCH_HOST:/opt/dsv41/patch_spinwait.py:ro" \
+        -v "$RESPONSES_PATCH_HOST:/opt/dsv41/patch_responses_content_types.py:ro" \
         -v "$EXL3_OVERLAY_HOST:/opt/dsv41/exl3.py:ro" \
         -v "$KMAP_HOST:/opt/dsv41/exl3_k_map.json:ro" \
         -v "$SCRIPT_DIR/overlay/patch_exl3_packed_names.py:/opt/dsv41/patch_exl3_packed_names.py:ro" \
@@ -1618,6 +1657,7 @@ launch_cluster() {
         -e MAX_NUM_BATCHED_TOKENS="$MAX_NUM_BATCHED_TOKENS" \
         -e LONG_PREFILL_TOKEN_THRESHOLD="${LONG_PREFILL_TOKEN_THRESHOLD:-}" \
         -e KV_CACHE_DTYPE="$KV_CACHE_DTYPE" \
+        -e PREFIX_CACHE_RETENTION_INTERVAL="$PREFIX_CACHE_RETENTION_INTERVAL" \
         -e SPEC_METHOD="$SPEC_METHOD" \
         -e DSPARK_TOKENS="${DSPARK_TOKENS:-5}" \
         -e LANGUAGE_MODEL_ONLY="$LANGUAGE_MODEL_ONLY" \
@@ -1835,7 +1875,7 @@ on_ready() {
     log "DeepSeek-V4.1-Flash EXL3 is UP (TP=${TP}, nnodes=${NNODES})"
     log "  endpoints  : http://127.0.0.1:${PORT}/v1   (LAN: ${HEAD_IP}:${PORT})"
     log "  model name : ${SERVED_MODEL_NAME}"
-    log "  weights    : ${MODEL_HOST}  quant=${QUANTIZATION}  kv=${KV_CACHE_DTYPE:-native-fp4}  sync=${WEIGHT_SYNC}/${WEIGHT_BACKEND:-}"
+    log "  weights    : ${MODEL_HOST}  quant=${QUANTIZATION}  kv=${KV_CACHE_DTYPE:-auto (fp8_ds_mla)}  sync=${WEIGHT_SYNC}/${WEIGHT_BACKEND:-}"
     log "  engram     : file-backed ${ENGRAM_SRC} (no 47GiB pin; packed=${HEAD_PACKED_DIR}) worker=${WORKER_ENGRAM_BIND}"
     local vision=on
     [ "${LANGUAGE_MODEL_ONLY}" = "1" ] && vision=off

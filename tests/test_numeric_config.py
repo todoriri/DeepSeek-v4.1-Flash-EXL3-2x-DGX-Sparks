@@ -137,10 +137,36 @@ def test_restart_validates_before_stop() -> None:
     assert validation < restart
 
 
+def test_agent_prefill_defaults() -> None:
+    source = START.read_text()
+    env_example = (ROOT / ".env.example").read_text()
+    assert 'MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-1536}"' in source
+    assert 'DSV41_IO_THREADS="${DSV41_IO_THREADS:-96}"' in source
+    assert "MAX_NUM_BATCHED_TOKENS=1536" in env_example
+    assert "DSV41_IO_THREADS=96" in env_example
+    # start.sh keeps upstream's vision-on default and its image-compatible chunk
+    # floor; this fork's .env.example opts out (text-only, d0c304c).
+    assert 'LANGUAGE_MODEL_ONLY="${LANGUAGE_MODEL_ONLY:-0}"' in source
+    for key, value in (
+        ("LANGUAGE_MODEL_ONLY", "1"),
+        ("MAX_NUM_BATCHED_TOKENS", "1536"),
+        ("DSV41_IO_THREADS", "96"),
+    ):
+        assignments = [line for line in env_example.splitlines() if line.startswith(key + "=")]
+        assert assignments == [f"{key}={value}"], (key, assignments)
+    threshold_lines = [
+        line for line in env_example.splitlines()
+        if line.startswith("LONG_PREFILL_TOKEN_THRESHOLD=")
+    ]
+    assert not threshold_lines, "long-prefill threshold must be disabled by omission"
+    assert "# LONG_PREFILL_TOKEN_THRESHOLD=1280" in env_example
+
+
 if __name__ == "__main__":
     test_matrix()
     test_decimal_normalization()
     test_indexer_workspace_enum()
     test_spinwait_numeric_contract()
     test_restart_validates_before_stop()
+    test_agent_prefill_defaults()
     print("numeric config tests: PASS")
