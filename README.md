@@ -31,7 +31,7 @@ The image overlays EXL3 onto `vllm/vllm-openai:deepseekv41-flash-0909`
 | Packed | `trellis` / `suh` / `svh` / `mul1` — marker int32 **`-2082680531`** (unsigned `2212286765` = `0x83DCD12D`). 47,900 packed matrices, 852 native tensors |
 | Native | `embed.weight`, router gate weight+bias, all norms, `attn_sink`, the `hc_*` coefficients, the whole vision tower, Engram `k_weight`/`q_weight`, indexer `weights_proj` |
 | KV | vLLM picks DeepSeek's **`fp8_ds_mla`** layout itself (`Using DeepSeek's fp8_ds_mla KV cache format` in the log). Do not pass `--kv-cache-dtype`. Measured pool cost here: 2.5 GiB per rank = **774,400 tokens** at `MAX_MODEL_LEN=614400`, i.e. ~3.4 KiB/token. (Upstream's "890 B/token" is the model's native FP4 main-KV design, not what this build allocates.) |
-| Sampling | Official: `temperature=1.0`, `top_p=0.95`. Thinking defaults **on**; the template's `reasoning_effort` defaults to `"high"` (= 75; `"low"`=50, `"max"`=100, or an int 1–100). Smokes should send `chat_template_kwargs.enable_thinking=false` |
+| Sampling | Official: `temperature=1.0`, `top_p=0.95`. Thinking defaults **on**; `reasoning_effort` defaults to `"high"` (= 75; `"low"`=50, `"max"`=100, `"xhigh"`=75, or an int 1–100). The image's encoder shipped the stale 25/50 table; `overlay/patch_reasoning_effort_mapping.py` restores the official one (vllm#58316). Smokes should send `chat_template_kwargs.enable_thinking=false` |
 
 ## Speculation
 
@@ -41,7 +41,7 @@ The image overlays EXL3 onto `vllm/vllm-openai:deepseekv41-flash-0909`
 | Flag | `--speculative-config '{"method":"dspark","num_speculative_tokens":3}'` |
 | k | **3** (`DSPARK_TOKENS`). `dspark_block_size=5` is the checkpoint's ceiling, not the setting: k=3 measured faster on prose |
 | Capture sizes | `1 2 3 4 6 8 12 18 24` — 6 is included so a k=3 step (2 seqs × 3 tokens) is captured |
-| Parsers | `--tokenizer-mode deepseek_v41` `--tool-call-parser deepseek_v41` `--reasoning-parser deepseek_v41` |
+| Parsers | `--tokenizer-mode deepseek_v41` `--tool-call-parser deepseek_v41` `--reasoning-parser deepseek_v41`. The `deepseek_v41` tokenizer renders prompts itself, so the `--chat-template` Jinja file is not consulted at serve time |
 | Off | `SPEC_METHOD=none` frees ~3.5 GiB and is faster once the batch is wide (see Measured) |
 
 ## Memory
@@ -307,9 +307,10 @@ higher) and restart.
 | `overlay/patch_memory_log.py` | `[dsv41-mem]` phase lines, page-cache drop, adaptive prefill release, EXL3 pre-tune hook |
 | `overlay/patch_exl3_lm_head.py` | packed `wo_a` through `quant_method.apply` in the CUDA o-proj and the DSpark draft loader |
 | `overlay/engram_file_backend.py`, `overlay/row_store.cpp` | file-backed `ParallelEngramEmbedding` |
+| `overlay/patch_reasoning_effort_mapping.py` | `deepseek_v41` encoder effort names → official low=50 / high=75 / max=100 (runtime patch, both ranks) |
 | `extensions/cooperative_moe/` | Optional decode MoE; not loaded unless `EXL3_OVERLAY_HOST` selects its overlay |
 | `files/exl3_k_map.json` | Per-tensor K |
-| `files/chat_template.jinja` | Port of DeepSeek `encoding.py` |
+| `files/chat_template.jinja` | Port of DeepSeek `encoding.py` (parity reference; not used at serve time under `--tokenizer-mode deepseek_v41`) |
 | `scripts/nfs-share.sh` | NFSv4 export + worker docker volumes (reuses `vllm-fn-nfs`) |
 | `scripts/zfs-share.sh` | Optional `zfs snapshot` + `send \| recv` fallback |
 | `scripts/prepare_engram_src.py` | Hardlink shards 47+48 + embed-only index |
