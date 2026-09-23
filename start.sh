@@ -708,7 +708,9 @@ build_image() {
     local stamp
     stamp="$(overlay_recipe_hash)"
     log "building ${IMAGE} (DeepSeek-V4.1 EXL3 + SM121 ext) stamp=${stamp:0:12} (log: $LOGDIR/build-sm121.log) ..."
-    docker build --build-arg "DSV41_RECIPE_STAMP=$stamp" -t "$IMAGE" "$SCRIPT_DIR" \
+    docker build --build-arg "DSV41_RECIPE_STAMP=$stamp" \
+        --build-arg "EXLLAMAV3_MOE_COOP_LAUNCH=${EXLLAMAV3_MOE_COOP_LAUNCH:-0}" \
+        -t "$IMAGE" "$SCRIPT_DIR" \
         >"$LOGDIR/build-sm121.log" 2>&1 \
         || { tail -n 40 "$LOGDIR/build-sm121.log" >&2; die "docker build of $IMAGE failed"; }
 }
