@@ -1,8 +1,34 @@
-# Effort mapping + prefix retention: live validation (2026-09-23)
+# Effort mapping + prefix retention: deployment and live validation (2026-09-23)
 
 Live 2×GB10 stack right after the effort-mapping patch (6e19496) and the upstream
 #12/#21 merge: EXL3 2.9 bpw, DSpark k=3, `MAX_NUM_SEQS=2`, MNBT 1024, text-only,
 4 GiB KV pool (1,253,996 tokens), `PREFIX_CACHE_RETENTION_INTERVAL=4096`.
+
+## 0. What was deployed
+
+| Change | Source | Effect on the live pair |
+|---|---|---|
+| Reasoning-effort mapping patch | `overlay/patch_reasoning_effort_mapping.py` (6e19496, mirrors vllm#58316) | The image's `deepseek_v41` encoder mapped low/high to 25/50; now low=50, high=75, xhigh=75, max=100. Default effort (`"high"`) goes 50 → 75 |
+| Prefix-cache retention 4096 | upstream MiaAI #21 | `--prefix-cache-retention-interval 4096` on both ranks |
+| Usage details | upstream MiaAI #12 | `--enable-prompt-tokens-details`: `usage.prompt_tokens_details.cached_tokens` per request |
+| Responses API content types | upstream MiaAI #12 | `input_text` / `output_text` parts accepted |
+| Engram IO threads | upstream MiaAI #12 | `DSV41_IO_THREADS` 32 → 96 (start.sh default; not overridden in `.env`) |
+| Live `.env` | gb10 kit | `LONG_PREFILL_TOKEN_THRESHOLD=1792` commented out: it exceeded `MAX_NUM_BATCHED_TOKENS=1024`, so it never clamped; behaviour unchanged |
+
+Procedure: kit backed up to `/mnt/storage1/dsv41/exl3-kit-predeploy-20260923-152044.tgz`
+(+ `.env.bak-effort-*`), changed files copied from this repo, then
+`SKIP_BUILD=1 SKIP_PULL=1 ./start.sh restart`. The skip flags are required because the
+pulled image's recipe label is `unknown`, which never equals the repo hash, so a plain
+restart would rebuild. Both patches are runtime-mounted and log
+`... patch: applied` on head and worker. Healthy in ~460 s; KV pool unchanged
+(1,253,996 tokens, 3.19× at 393,216); watchdog paused and resumed by start.sh; idle
+MemAvailable 4.9 GiB head / 5.0 GiB worker.
+
+Post-deploy checks: `/tokenize` renders `Reasoning Effort: 75` for `"high"` and for no
+effort (50 low, 75 xhigh, 100 max, integers verbatim); a Responses API `input_text`
+request answers `323`; upstream's retention boundary cases cache 8064 / 4096 / 4096 /
+8192 / 32768 tokens at 8192 / 8193 / 8256 / 8257 / 34357 input tokens, matching upstream's
+retention-4096 numbers (the 8193, 8256 and 34357 cases were zero hits at retention 0).
 
 ## 1. Reasoning effort 50 (old "high") vs 75 (official "high")
 

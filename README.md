@@ -317,6 +317,8 @@ higher) and restart.
 | `scripts/pack_engram.py` | Per-rank hash-head Engram shards for local NVMe |
 | `scripts/memguard.sh` | per-node MemAvailable watchdog, **off by default** (`DSV41_MEM_GUARD=1` arms it) |
 | `scripts/weight_budget.py` | per-rank resident weight bytes from the safetensors index (preflight headroom check) |
+| `scripts/effort_ab.py` | live A/B of reasoning-effort budgets on graded math + coding tasks |
+| `scripts/prefix_retention_agent.py` | live prefix-cache reuse vs ideal on agent-shaped sessions |
 
 ## Engram
 
@@ -417,7 +419,10 @@ new prefill. Set `PREFIX_CACHE_RETENTION_INTERVAL=0` to restore the previous pol
 Use this knob rather than duplicating the flag in `EXTRA_ARGS`.
 
 See [prefix-cache retention](docs/prefix-cache-retention.md) for the reproduction,
-configuration validation, operational limits, and deployment checks.
+configuration validation, operational limits, and deployment checks. On this pair,
+tool-using agent sessions (append, fork, interleaved, thinking-on) reused 96–99.5%
+of the ideal prefix with no warm zero-hits; see
+[the 2026-09-23 validation](docs/effort-and-retention-validation-20260923.md).
 
 ## CX7
 
@@ -434,6 +439,7 @@ Host-side (pure source/JSON checks — no torch, no vLLM):
 python3 tests/test_numeric_config.py
 python3 tests/test_engram_src.py
 python3 tests/test_responses_content_types.py
+python3 tests/test_reasoning_effort_patch.py
 python3 tests/test_engram_secondary.py
 python3 tests/test_k_map.py
 python3 tests/test_memory_log.py
@@ -457,8 +463,21 @@ python3 tests/test_chat_template.py --src /home/mia/NewModels/DeepSeek-V4.1-Flas
 After `./start.sh` is healthy:
 
 ```bash
-bash tests/test_smoke.sh          # 17*19 -> 323
+bash tests/test_smoke.sh http://127.0.0.1:${PORT}   # 17*19 -> 323 (defaults to :8888)
 ```
+
+Live behaviour checks (run from any host that reaches the API; both only send
+requests, and `effort_ab.py` runs model-written code under `unshare -rn`):
+
+```bash
+python3 scripts/effort_ab.py --base http://<head>:${PORT} --reps 2 --concurrency 2
+python3 scripts/prefix_retention_agent.py --base http://<head>:${PORT}
+```
+
+`effort_ab.py` A/Bs integer reasoning budgets (default 50 vs 75) on graded math
+and coding tasks; `prefix_retention_agent.py` compares `cached_tokens` with the
+ideal `/tokenize` prefix across agent-shaped sessions. Results from 2026-09-23:
+[docs/effort-and-retention-validation-20260923.md](docs/effort-and-retention-validation-20260923.md).
 
 The image build runs thirteen in-image tests (EXL3 overlay with
 `EXL3_SELFCHECK_GPU=0`, suppress-stops, scheduler decode floor, spinwait, Engram
