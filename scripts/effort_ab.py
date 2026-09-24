@@ -12,6 +12,7 @@ Thinking on, official sampling (temperature 1.0, top_p 0.95).  Arms are
 interleaved per prompt so load and cache state hit both arms equally.
 
     python3 scripts/effort_ab.py --base http://192.168.1.97:8000 --reps 2 --concurrency 2
+    python3 scripts/effort_ab.py --set hard --efforts 75,100 --max-tokens 32768
 """
 from __future__ import annotations
 
@@ -242,11 +243,16 @@ def main() -> int:
     ap.add_argument("--max-tokens", type=int, default=16384)
     ap.add_argument("--out", default="")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--set", choices=("basic", "hard"), default="basic",
+                    help="basic = the 2026-09-23 set; hard = scripts/effort_items_hard.py")
     args = ap.parse_args()
     efforts = [int(e) for e in args.efforts.split(",")]
 
-    items = [("math", f"m{i}", q + MATH_SUFFIX, a) for i, (q, a) in enumerate(MATH)]
-    items += [("code", n, p + CODE_SUFFIX, t) for n, p, t in CODE]
+    math_set, code_set = MATH, CODE
+    if args.set == "hard":
+        from effort_items_hard import CODE as code_set, MATH as math_set
+    items = [("math", f"m{i}", q + MATH_SUFFIX, a) for i, (q, a) in enumerate(math_set)]
+    items += [("code", n, p + CODE_SUFFIX, t) for n, p, t in code_set]
     jobs = []
     rng = random.Random(args.seed)
     for rep in range(args.reps):
