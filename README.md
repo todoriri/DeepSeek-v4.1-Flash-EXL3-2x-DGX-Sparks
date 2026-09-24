@@ -43,7 +43,7 @@ The image overlays EXL3 onto `vllm/vllm-openai:deepseekv41-flash-0909`
 | Capture sizes | `1 2 3 4 6 8 12 18 24` — 6 is included so a k=3 step (2 seqs × 3 tokens) is captured |
 | Parsers | `--tokenizer-mode deepseek_v41` `--tool-call-parser deepseek_v41` `--reasoning-parser deepseek_v41`. The `deepseek_v41` tokenizer renders prompts itself, so the `--chat-template` Jinja file is not consulted at serve time |
 | Off | `SPEC_METHOD=none` frees ~3.5 GiB and is faster once the batch is wide (see Measured) |
-| Adaptive | `DSPARK_ADAPTIVE=1` adds `"enable_adaptive_verification":true`: the verify budget per request follows the draft's confidence and the step cost, up to `DSPARK_TOKENS`. Needs CUDA graphs; off by default, unmeasured here until `scripts/spec_bench.py` says otherwise |
+| Adaptive | **Not available on this image.** vLLM's `enable_adaptive_verification` is refused by the `DeepseekV4IndexerBackend` at KV init, after ~9 min of loading (2026-09-24 trial, `docs/spec-adaptive-and-nccl-heartbeat-20260924.md`); `start.sh` refuses it up front |
 
 ## Memory
 
