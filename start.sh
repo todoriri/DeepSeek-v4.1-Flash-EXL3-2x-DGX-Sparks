@@ -143,6 +143,10 @@ MASTER_PORT="${MASTER_PORT:-29521}"
 # dspark (default, in-checkpoint, k=5) | none
 SPEC_METHOD="${SPEC_METHOD:-dspark}"
 DSPARK_TOKENS="${DSPARK_TOKENS:-5}"
+# 1 = DSpark adaptive verification (vLLM enable_adaptive_verification): the draft
+# budget is sized per request from the draft's confidence and the step's cost, instead
+# of always verifying DSPARK_TOKENS. Needs CUDA graphs (ENFORCE_EAGER=0). 0 = off.
+DSPARK_ADAPTIVE="${DSPARK_ADAPTIVE:-0}"
 # Native CSA2 KV is ~890 B/token FP4. Do not force GLM's fp8_ds_mla.
 KV_CACHE_DTYPE="${KV_CACHE_DTYPE:-}"
 # 64-token KV blocks on GB10 (SM12x DeepGEMM paged indexer: 32/64 states per block).
@@ -382,6 +386,24 @@ _dsv41_validate_prefix_retention() {
     export PREFIX_CACHE_RETENTION_INTERVAL
 }
 
+_dsv41_validate_spec_and_heartbeat() {
+    _glm53_validate_enum DSPARK_ADAPTIVE "${DSPARK_ADAPTIVE:-0}" 0 1 || return
+    if [ "${DSPARK_ADAPTIVE:-0}" = 1 ]; then
+        if [ "${SPEC_METHOD:-dspark}" != dspark ]; then
+            echo "DSPARK_ADAPTIVE=1 needs SPEC_METHOD=dspark (got: ${SPEC_METHOD})" >&2
+            return 2
+        fi
+        if [ "${ENFORCE_EAGER:-0}" = 1 ]; then
+            echo "DSPARK_ADAPTIVE=1 needs CUDA graphs: unset ENFORCE_EAGER=1" >&2
+            return 2
+        fi
+    fi
+    if [ -n "${TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC:-}" ]; then
+        _glm53_canonical_positive_int TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC \
+            "$TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC" 86400 || return
+    fi
+}
+
 validate_numeric_config() {
     if ! [[ "$GPU_MEM_UTIL" =~ ^(0([.][0-9]+)?|[.][0-9]+|1([.]0+)?)$ ]] \
        || ! awk -v u="$GPU_MEM_UTIL" 'BEGIN { exit !(u > 0 && u <= 1) }'; then
@@ -395,6 +417,7 @@ validate_numeric_config() {
         stock rightsize || return
     _glm53_validate_spinwait_ms || return
     _dsv41_validate_prefix_retention || return
+    _dsv41_validate_spec_and_heartbeat || return
 }
 # GLM53 numeric config guard (end)
 
@@ -1204,7 +1227,9 @@ ARGS=(
 [ -n "${KV_BLOCK_SIZE:-}" ] && ARGS+=(--block-size "${KV_BLOCK_SIZE}")
 if [ "${SPEC_METHOD:-dspark}" = "dspark" ]; then
     ARGS+=(--speculative-config "$(python3 -S -c 'import json,os
-print(json.dumps({"method":"dspark","num_speculative_tokens":int(os.environ.get("DSPARK_TOKENS","5"))},separators=(",",":")))')")
+c={"method":"dspark","num_speculative_tokens":int(os.environ.get("DSPARK_TOKENS","5"))}
+if os.environ.get("DSPARK_ADAPTIVE","0")=="1": c["enable_adaptive_verification"]=True
+print(json.dumps(c,separators=(",",":")))')")
 elif [ "${SPEC_METHOD:-dspark}" = "none" ]; then
     :
 fi
@@ -1304,7 +1329,9 @@ ARGS=(
 [ -n "${KV_BLOCK_SIZE:-}" ] && ARGS+=(--block-size "${KV_BLOCK_SIZE}")
 if [ "${SPEC_METHOD:-dspark}" = "dspark" ]; then
     ARGS+=(--speculative-config "$(python3 -S -c 'import json,os
-print(json.dumps({"method":"dspark","num_speculative_tokens":int(os.environ.get("DSPARK_TOKENS","5"))},separators=(",",":")))')")
+c={"method":"dspark","num_speculative_tokens":int(os.environ.get("DSPARK_TOKENS","5"))}
+if os.environ.get("DSPARK_ADAPTIVE","0")=="1": c["enable_adaptive_verification"]=True
+print(json.dumps(c,separators=(",",":")))')")
 elif [ "${SPEC_METHOD:-dspark}" = "none" ]; then
     :
 fi
@@ -1522,6 +1549,14 @@ launch_cluster() {
         -e "DSV41_EXL3_K_MAP=/opt/dsv41/exl3_k_map.json"
         -e GLM53_DENSE_FP8=off
     )
+    # TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC (both ranks). Unset = torch's default 480 s, which
+    # matched the ~480 s recovery clock of the 09-20/21 stalls
+    # (docs/exl3-moe-wedge-ab-investigation-20260921.md §5, §9 item 2): set it to move that
+    # clock and see whether recovery follows. Passed only when set (an empty value is not
+    # an int to torch); validate_numeric_config checks it.
+    if [ -n "${TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC:-}" ]; then
+        nccl_common+=(-e "TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC=$TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC")
+    fi
     local worker_nccl="" e
     for e in "${nccl_common[@]}"; do
         [ "$e" = "-e" ] && continue
@@ -1548,7 +1583,7 @@ launch_cluster() {
     local v
     for v in SERVED_MODEL_NAME PORT TP NNODES HEAD_IP MASTER_PORT QUANTIZATION \
              MAX_MODEL_LEN GPU_MEM_UTIL MAX_NUM_SEQS MAX_NUM_BATCHED_TOKENS \
-             KV_CACHE_DTYPE SPEC_METHOD DSPARK_TOKENS PREFIX_CACHE_RETENTION_INTERVAL \
+             KV_CACHE_DTYPE SPEC_METHOD DSPARK_TOKENS DSPARK_ADAPTIVE PREFIX_CACHE_RETENTION_INTERVAL \
              LANGUAGE_MODEL_ONLY SKIP_MM_PROFILING \
              LIMIT_MM CHAT_TEMPLATE ENFORCE_EAGER EXL3_FUSED_MOE EXL3_MOE_ROW_TILE \
              EXL3_TEMP_ROWS_FUSED EXL3_FAT_SORTED EXL3_FAT_BATCHED EXL3_FAT_KERNEL \
@@ -1667,6 +1702,7 @@ launch_cluster() {
         -e PREFIX_CACHE_RETENTION_INTERVAL="$PREFIX_CACHE_RETENTION_INTERVAL" \
         -e SPEC_METHOD="$SPEC_METHOD" \
         -e DSPARK_TOKENS="${DSPARK_TOKENS:-5}" \
+        -e DSPARK_ADAPTIVE="${DSPARK_ADAPTIVE:-0}" \
         -e LANGUAGE_MODEL_ONLY="$LANGUAGE_MODEL_ONLY" \
         -e SKIP_MM_PROFILING="$SKIP_MM_PROFILING" \
         -e LIMIT_MM="$LIMIT_MM" \
@@ -1887,6 +1923,7 @@ on_ready() {
     local vision=on
     [ "${LANGUAGE_MODEL_ONLY}" = "1" ] && vision=off
     local spec="DSpark k=${DSPARK_TOKENS} (in-checkpoint)"
+    [ "${DSPARK_ADAPTIVE:-0}" = 1 ] && spec="DSpark k<=${DSPARK_TOKENS} adaptive (in-checkpoint)"
     [ "$SPEC_METHOD" = "none" ] && spec=off
     log "  features   : tokenizer=deepseek_v41 tools=deepseek_v41 reasoning=deepseek_v41 spec=${spec} vision=${vision}"
     local auth_line="none (VLLM_API_KEY empty)"
