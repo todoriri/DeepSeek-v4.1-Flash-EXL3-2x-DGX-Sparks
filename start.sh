@@ -218,6 +218,11 @@ VLLM_API_KEY="${VLLM_API_KEY:-}"
 
 CONTAINER_HEAD="${CONTAINER_HEAD:-dsv41-exl3-head}"
 CONTAINER_WORKER="${CONTAINER_WORKER:-dsv41-exl3-worker}"
+# Explicit NVIDIA nodes next to every `--gpus all`. Without CDI the legacy hook
+# allows them only in its own device BPF, not in the systemd scope, so any
+# `systemctl daemon-reload` (snapd) revokes new opens: CUDA 800 'operation not
+# permitted' at the next module load (2026-10-03 EngineDead, reproduced on gb10).
+GPU_DEVICE_ARGS="--device /dev/nvidia0 --device /dev/nvidiactl --device /dev/nvidia-uvm --device /dev/nvidia-uvm-tools"
 
 MODEL_HOST="${MODEL_HOST:-$SCRIPT_DIR/model}"
 ENGRAM_DIR="${ENGRAM_DIR:-$SCRIPT_DIR/engram-src}"
@@ -968,7 +973,7 @@ ensure_image() {
         log "GPU EXL3 self-check on ${IMAGE} (log: $LOGDIR/overlay-verify.log) ..."
         # GEMM parity plus the Engram fp8 row dequant (the kernel must decode
         # fp8 e4m3 bytes; as integers every boot up to 2026-09-12 spoke garbage).
-        docker run --rm --gpus all \
+        docker run --rm --gpus all ${GPU_DEVICE_ARGS} \
             -e EXL3_SELFCHECK_GPU=1 \
             --entrypoint bash "$IMAGE" -c "python3 /opt/dsv41/test_exl3_overlay.py && python3 /opt/dsv41/test_engram_dequant.py" \
             >"$LOGDIR/overlay-verify.log" 2>&1 \
@@ -1605,7 +1610,7 @@ launch_cluster() {
     worker_ssh "docker run -d --name '$CONTAINER_WORKER' \
         --gpus all --network host --ipc=host --shm-size 32g --stop-timeout 60 \
         --oom-score-adj 1000 --cap-add SYS_PTRACE \
-        --device /dev/infiniband --cap-add IPC_LOCK \
+        --device /dev/infiniband ${GPU_DEVICE_ARGS} --cap-add IPC_LOCK \
         --ulimit memlock=-1 --ulimit stack=67108864 \
         -v '$WORKER_MODEL_BIND:/model:ro' \
         -v '$WORKER_ENGRAM_BIND:/engram-src:ro' \
@@ -1646,7 +1651,7 @@ launch_cluster() {
     docker run -d --name "$CONTAINER_HEAD" \
         --gpus all --network host --ipc=host --shm-size 32g --stop-timeout 60 \
         --oom-score-adj 1000 --cap-add SYS_PTRACE \
-        --device /dev/infiniband --cap-add IPC_LOCK \
+        --device /dev/infiniband ${GPU_DEVICE_ARGS} --cap-add IPC_LOCK \
         --ulimit memlock=-1 --ulimit stack=67108864 \
         -v "$MODEL_HOST:/model:ro" \
         -v "${HEAD_ENGRAM_BIND:-$ENGRAM_SRC}:/engram-src:ro" \
