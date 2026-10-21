@@ -149,6 +149,9 @@ COPY overlay/patch_sm120_block64.py /opt/dsv41/patch_sm120_block64.py
 # when DSV41_YOCO_PREFILL=compact (start.sh); here only its anchors are verified.
 COPY overlay/patch_yoco_prefill.py /opt/dsv41/patch_yoco_prefill.py
 COPY overlay/dsv41_yoco.py /opt/dsv41/dsv41_yoco.py
+# Final sliding-window retention: applied at container start only when
+# DSV41_SWA_FINAL_WINDOW=keep (start.sh); here only its anchors are verified.
+COPY overlay/patch_swa_final_window.py /opt/dsv41/patch_swa_final_window.py
 COPY files/chat_template.jinja /opt/dsv41/chat_template.jinja
 COPY files/exl3_k_map.json /opt/dsv41/exl3_k_map.json
 COPY tests/test_exl3_overlay.py /opt/dsv41/test_exl3_overlay.py
@@ -196,6 +199,7 @@ RUN python3 /opt/dsv41/patch_h2d_stage.py
 RUN python3 /opt/dsv41/patch_sm120_block64.py
 RUN python3 /opt/dsv41/patch_memory_log.py
 RUN python3 /opt/dsv41/patch_yoco_prefill.py --check
+RUN python3 /opt/dsv41/patch_swa_final_window.py --check
 
 RUN EXL3_SELFCHECK_GPU=0 python3 /opt/dsv41/test_exl3_overlay.py \
     && python3 /opt/dsv41/test_suppress_stops.py \

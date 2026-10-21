@@ -161,15 +161,19 @@ preemption. That matches DeepInfer's `seq_data->get_len()`. The rectangle is
   about 3x and remove the garbage pages. It is a KV-layout change and needs its own
   trial.
 
-**Coordination with "Keep final SWA window at request end".** On 2026-10-20 that task
-existed only as an unstarted chip (task_75885f92); nothing had landed. It works on the
-same `reachable_boundaries` list in `SingleTypeKVCacheManager.cache_blocks`. Under YOCO, a
-hit at the request end is usable only when the next turn adds at least KEEP + 64 tokens.
-When YOCO is on, that task should also keep `request_end − KEEP − 64`, mirroring the
-boundary this patch adds at the prompt end. Whichever change lands second rebases its
-anchor. This patch's anchor is the two lines starting
-`reachable_boundaries = [request.num_prompt_tokens - 1]`, and drift fails the patch
-loudly.
+**Coordination with the final-window overlay (2026-10-21).** "Keep final SWA window at
+request end" landed as `overlay/patch_swa_final_window.py` (`DSV41_SWA_FINAL_WINDOW=keep`,
+off by default; docs/swa-final-window-retention.md).
+
+- It does not use `reachable_boundaries`. It holds the newest aligned window in
+  `SlidingWindowManager.__init__` and hashes its tail in `KVCacheManager.free` /
+  `pop_blocks_for_free`. None of this patch's anchors are touched, and either patch may run
+  first. start.sh runs it before this one.
+- Under compact it also keeps `align128(T − KEEP − 64)` at the request end, as asked here.
+  That checkpoint is usable by any continuation, because the request-end checkpoint needs
+  the next turn to add about 12-140 tokens under the `N − KEEP` cap.
+- This patch's anchor is still the two lines starting
+  `reachable_boundaries = [request.num_prompt_tokens - 1]`, and drift fails it loudly.
 
 ## 6. DSpark
 

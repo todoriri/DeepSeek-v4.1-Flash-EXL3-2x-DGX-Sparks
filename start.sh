@@ -162,6 +162,11 @@ PREFIX_CACHE_RETENTION_INTERVAL="${PREFIX_CACHE_RETENTION_INTERVAL-4096}"
 # refused). Unset/off leaves the vLLM argv and the image's vLLM files untouched.
 DSV41_YOCO_PREFILL="${DSV41_YOCO_PREFILL-off}"
 DSV41_YOCO_KEEP_TOKENS="${DSV41_YOCO_KEEP_TOKENS-140}"
+# Final sliding-window retention (DeepInfer's decode-time SWA store), OFF by default; see
+# docs/swa-final-window-retention.md. keep = a finished or preempted request leaves a
+# prefix-cache checkpoint at its end, so the next agent turn does not prefill its own
+# previous output again (exact). Unset/off leaves the vLLM argv and files untouched.
+DSV41_SWA_FINAL_WINDOW="${DSV41_SWA_FINAL_WINDOW-off}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-600000}"
 GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.88}"
 MAX_NUM_SEQS="${MAX_NUM_SEQS:-2}"
@@ -181,6 +186,7 @@ EXL3_OVERLAY_HOST="${EXL3_OVERLAY_HOST:-$SCRIPT_DIR/overlay/exl3.py}"
 KMAP_HOST="${KMAP_HOST:-$SCRIPT_DIR/files/exl3_k_map.json}"
 YOCO_PATCH_HOST="${YOCO_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_yoco_prefill.py}"
 YOCO_HELPER_HOST="${YOCO_HELPER_HOST:-$SCRIPT_DIR/overlay/dsv41_yoco.py}"
+SWA_FINAL_PATCH_HOST="${SWA_FINAL_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_swa_final_window.py}"
 QUANTIZATION="${QUANTIZATION:-exl3}"
 LANGUAGE_MODEL_ONLY="${LANGUAGE_MODEL_ONLY:-0}"
 SKIP_MM_PROFILING="${SKIP_MM_PROFILING:-1}"
@@ -442,6 +448,14 @@ _dsv41_validate_yoco() {
     fi
 }
 
+_dsv41_validate_swa_final_window() {
+    local mode="${DSV41_SWA_FINAL_WINDOW-off}"
+    mode="${mode:-off}"
+    _glm53_validate_enum DSV41_SWA_FINAL_WINDOW "$mode" off keep || return
+    DSV41_SWA_FINAL_WINDOW="$mode"
+    export DSV41_SWA_FINAL_WINDOW
+}
+
 validate_numeric_config() {
     if ! [[ "$GPU_MEM_UTIL" =~ ^(0([.][0-9]+)?|[.][0-9]+|1([.]0+)?)$ ]] \
        || ! awk -v u="$GPU_MEM_UTIL" 'BEGIN { exit !(u > 0 && u <= 1) }'; then
@@ -457,6 +471,7 @@ validate_numeric_config() {
     _dsv41_validate_prefix_retention || return
     _dsv41_validate_spec_and_heartbeat || return
     _dsv41_validate_yoco || return
+    _dsv41_validate_swa_final_window || return
 }
 # GLM53 numeric config guard (end)
 
@@ -643,6 +658,7 @@ preflight() {
     [ -f "$KMAP_HOST" ] || die "$KMAP_HOST missing"
     [ -f "$YOCO_PATCH_HOST" ] || die "$YOCO_PATCH_HOST missing"
     [ -f "$YOCO_HELPER_HOST" ] || die "$YOCO_HELPER_HOST missing"
+    [ -f "$SWA_FINAL_PATCH_HOST" ] || die "$SWA_FINAL_PATCH_HOST missing"
     [ -f "$CHAT_TEMPLATE_HOST" ] || die "$CHAT_TEMPLATE_HOST missing"
     fetch_weights
 
@@ -1309,6 +1325,10 @@ for p in /opt/dsv41/patch_suppress_stops_in_reasoning.py \
         python3 "$p" || say "WARN: $p returned $?"
     fi
 done
+if [ "${DSV41_SWA_FINAL_WINDOW:-off}" != "off" ]; then
+    say "SWA final-window retention: ${DSV41_SWA_FINAL_WINDOW} (a freed request caches its last aligned sliding window)"
+    python3 /opt/dsv41/patch_swa_final_window.py || { say "FATAL: SWA final-window patch failed"; exit 1; }
+fi
 if [ "${DSV41_YOCO_PREFILL:-off}" != "off" ]; then
     say "YOCO prefill truncation: ${DSV41_YOCO_PREFILL} keep=${DSV41_YOCO_KEEP_TOKENS:-140} (decoder layers prefill the last N positions only)"
     python3 /opt/dsv41/patch_yoco_prefill.py || { say "FATAL: YOCO prefill patch failed"; exit 1; }
@@ -1411,6 +1431,10 @@ for p in /opt/dsv41/patch_suppress_stops_in_reasoning.py \
         python3 "$p" || say "WARN: $p returned $?"
     fi
 done
+if [ "${DSV41_SWA_FINAL_WINDOW:-off}" != "off" ]; then
+    say "SWA final-window retention: ${DSV41_SWA_FINAL_WINDOW} (a freed request caches its last aligned sliding window)"
+    python3 /opt/dsv41/patch_swa_final_window.py || { say "FATAL: SWA final-window patch failed"; exit 1; }
+fi
 if [ "${DSV41_YOCO_PREFILL:-off}" != "off" ]; then
     say "YOCO prefill truncation: ${DSV41_YOCO_PREFILL} keep=${DSV41_YOCO_KEEP_TOKENS:-140} (decoder layers prefill the last N positions only)"
     python3 /opt/dsv41/patch_yoco_prefill.py || { say "FATAL: YOCO prefill patch failed"; exit 1; }
@@ -1509,6 +1533,7 @@ launch_cluster() {
     scp -q -o BatchMode=yes "$SCRIPT_DIR/overlay/patch_sm120_block64.py" "${WORKER_SSH}:/tmp/patch_sm120_block64.py"
     scp -q -o BatchMode=yes "$YOCO_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_yoco_prefill.py"
     scp -q -o BatchMode=yes "$YOCO_HELPER_HOST" "${WORKER_SSH}:/tmp/dsv41_yoco.py"
+    scp -q -o BatchMode=yes "$SWA_FINAL_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_swa_final_window.py"
     scp -q -o BatchMode=yes "$MEMGUARD_HOST" "${WORKER_SSH}:/tmp/dsv41-memguard.sh"
 
     local -a nccl_common=(
@@ -1639,7 +1664,8 @@ launch_cluster() {
              DSV41_CACHE_WAYS DSV41_STATS_SECONDS KV_CACHE_MEMORY_BYTES KV_BLOCK_SIZE \
              DSV41_SKIP_MIXED_WARMUP DSV41_DROP_PAGE_CACHE \
              DSV41_PREFILL_EMPTY_CACHE_MEMAVAIL_GIB DSV41_PREFILL_END_EMPTY_CACHE VLLM_SPARSE_INDEXER_MAX_LOGITS_MB \
-             LONG_PREFILL_TOKEN_THRESHOLD DSV41_YOCO_PREFILL DSV41_YOCO_KEEP_TOKENS; do
+             LONG_PREFILL_TOKEN_THRESHOLD DSV41_YOCO_PREFILL DSV41_YOCO_KEEP_TOKENS \
+             DSV41_SWA_FINAL_WINDOW; do
         serve_env+=" -e $v='${!v:-}'"
     done
     serve_env+=" -e VLLM_API_KEY='${VLLM_API_KEY:-}'"
@@ -1690,6 +1716,7 @@ launch_cluster() {
         -v '/tmp/patch_sm120_block64.py:/opt/dsv41/patch_sm120_block64.py:ro' \
         -v '/tmp/patch_yoco_prefill.py:/opt/dsv41/patch_yoco_prefill.py:ro' \
         -v '/tmp/dsv41_yoco.py:/opt/dsv41/dsv41_yoco.py:ro' \
+        -v '/tmp/patch_swa_final_window.py:/opt/dsv41/patch_swa_final_window.py:ro' \
         ${worker_packed_args} \
         ${worker_preload} \
         ${worker_nccl} \
@@ -1733,6 +1760,7 @@ launch_cluster() {
         -v "$SCRIPT_DIR/overlay/patch_sm120_block64.py:/opt/dsv41/patch_sm120_block64.py:ro" \
         -v "$YOCO_PATCH_HOST:/opt/dsv41/patch_yoco_prefill.py:ro" \
         -v "$YOCO_HELPER_HOST:/opt/dsv41/dsv41_yoco.py:ro" \
+        -v "$SWA_FINAL_PATCH_HOST:/opt/dsv41/patch_swa_final_window.py:ro" \
         "${head_packed_args[@]}" \
         "${head_preload[@]}" \
         "${nccl_common[@]}" \
@@ -1753,6 +1781,7 @@ launch_cluster() {
         -e PREFIX_CACHE_RETENTION_INTERVAL="$PREFIX_CACHE_RETENTION_INTERVAL" \
         -e DSV41_YOCO_PREFILL="$DSV41_YOCO_PREFILL" \
         -e DSV41_YOCO_KEEP_TOKENS="$DSV41_YOCO_KEEP_TOKENS" \
+        -e DSV41_SWA_FINAL_WINDOW="$DSV41_SWA_FINAL_WINDOW" \
         -e SPEC_METHOD="$SPEC_METHOD" \
         -e DSPARK_TOKENS="${DSPARK_TOKENS:-5}" \
         -e LANGUAGE_MODEL_ONLY="$LANGUAGE_MODEL_ONLY" \

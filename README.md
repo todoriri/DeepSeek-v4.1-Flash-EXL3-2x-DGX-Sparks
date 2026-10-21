@@ -444,6 +444,27 @@ It has not been deployed. The design, the prefix-cache and DSpark analysis, and 
 operator's maintenance-window plan are in
 [docs/yoco-prefill-truncation.md](docs/yoco-prefill-truncation.md).
 
+## Final sliding-window retention — prepared, off by default
+
+On an agent turn, the next prompt holds the previous turn's whole output. Today the prefix
+cache keeps the hybrid model's sliding-window state only at a prefill's end and every
+`PREFIX_CACHE_RETENTION_INTERVAL` tokens, so the next turn prefills that output again. In
+the week to 10-21 that was 3.98 M of 4.86 M own-output tokens (repl PROGRESS 10-19 #5).
+
+`DSV41_SWA_FINAL_WINDOW=keep` ports DeepInfer's decode-time SWA store:
+
+- A request keeps its newest 128-aligned window allocated (192 extra tokens per SWA group,
+  332 under YOCO compact, with the admission cap raised to match).
+- When the request is freed (finish, abort or preemption), it hashes that window, so the next
+  turn hits 64-192 tokens below the previous end. Under YOCO compact a second checkpoint,
+  KEEP + 64 further back, serves short continuations.
+
+It is exact: hit selection, retention and the DSpark block drop are unchanged. The record
+predicts −78 % of the own-output re-prefill. Unset or `off` is today's launch: the vLLM
+argv is byte-identical and the patch does not run. It has not been deployed. The design,
+the deferred encoder bounded replay, and the operator's measurement plan are in
+[docs/swa-final-window-retention.md](docs/swa-final-window-retention.md).
+
 ## CX7
 
 Pins on this pair: spark1 `enp1s0f1np1`/`rocep1s0f1` ↔
@@ -482,6 +503,18 @@ python3 tests/test_yoco_driver.py
 python3 tests/test_yoco_prefill_patch.py
 python3 tests/test_yoco_launcher.py
 python3 tests/test_yoco_logprob_ab.py
+```
+
+The final-window retention tests run the image's own prefix-cache code on CPU (same
+fixture tree; `torch` + `numpy` for the YOCO combinations). One of them replays 40 recorded
+agent turns and reproduces every recorded cache hit:
+
+```bash
+python3 tests/test_swa_final_window_sim.py
+python3 tests/test_swa_final_window_patch.py
+python3 tests/test_swa_final_window_launcher.py
+python3 tests/test_swa_final_window_turns.py
+python3 scripts/swa_final_window_turns.py --from=-7d   # read-only, the repl request record
 ```
 
 The chat-template parity harness needs `transformers` **and** the original
