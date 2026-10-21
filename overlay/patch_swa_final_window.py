@@ -178,20 +178,28 @@ def _dsv41_swa_final_window(kv_cache_manager, request) -> None:
         for manager in coordinator.single_type_managers:
             if isinstance(manager, SlidingWindowManager):
                 hits.update(_dsv41_swa_final_cache(manager, request, num_computed))
-        if hits:
-            logger.info_once(
-                "[dsv41-swa-final-window] caching final sliding windows (first: %s, "
-                "%d computed tokens, checkpoints %s)",
-                request.request_id,
-                num_computed,
-                sorted(hits),
-            )
     except Exception:
         # Never block a free: the request's blocks are released uncached, as stock.
         logger.exception(
             "[dsv41-swa-final-window] caching the final window of %s failed",
             request.request_id,
         )
+        return
+    global _DSV41_SWA_FINAL_LOGGED
+    if hits and not _DSV41_SWA_FINAL_LOGGED:
+        # Once per process, outside the try: *_once dedups on hashable args only, and
+        # the request id differs per call, so it neither logged once nor took a list.
+        _DSV41_SWA_FINAL_LOGGED = True
+        logger.info(
+            "[dsv41-swa-final-window] caching final sliding windows (first: %s, "
+            "%d computed tokens, checkpoints %s)",
+            request.request_id,
+            num_computed,
+            ", ".join(str(hit) for hit in sorted(hits)),
+        )
+
+
+_DSV41_SWA_FINAL_LOGGED = False
 '''
 
 JOBS: list[tuple[str, list[tuple[str, str]], str | None]] = [

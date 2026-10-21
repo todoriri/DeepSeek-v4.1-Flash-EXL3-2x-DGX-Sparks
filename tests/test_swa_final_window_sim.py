@@ -82,13 +82,18 @@ def b_yoco(num_tokens: int, keep: int = KEEP) -> int:
 
 # ------------------------------------------------------------------- stubbed leaf imports
 class _Log(logging.Logger):
+    # vLLM's *_once dedup lru-caches (msg, *args), so every arg must be hashable: a list
+    # raised TypeError on every free on the live A3 arm (2026-10-21).
     def info_once(self, *a, **k):
+        hash(a)
         self.info(*a)
 
     def warning_once(self, *a, **k):
+        hash(a)
         self.warning(*a)
 
     def debug_once(self, *a, **k):
+        hash(a)
         self.debug(*a)
 
 
