@@ -145,6 +145,10 @@ COPY overlay/patch_spinwait.py /opt/dsv41/patch_spinwait.py
 COPY overlay/patch_memory_log.py /opt/dsv41/patch_memory_log.py
 COPY overlay/patch_h2d_stage.py /opt/dsv41/patch_h2d_stage.py
 COPY overlay/patch_sm120_block64.py /opt/dsv41/patch_sm120_block64.py
+# Decoder-SWA bounded replay (YOCO prefill truncation): applied at container start only
+# when DSV41_YOCO_PREFILL=compact (start.sh); here only its anchors are verified.
+COPY overlay/patch_yoco_prefill.py /opt/dsv41/patch_yoco_prefill.py
+COPY overlay/dsv41_yoco.py /opt/dsv41/dsv41_yoco.py
 COPY files/chat_template.jinja /opt/dsv41/chat_template.jinja
 COPY files/exl3_k_map.json /opt/dsv41/exl3_k_map.json
 COPY tests/test_exl3_overlay.py /opt/dsv41/test_exl3_overlay.py
@@ -161,6 +165,7 @@ COPY tests/test_h2d_stage.py /opt/dsv41/test_h2d_stage.py
 COPY tests/test_sm120_block64.py /opt/dsv41/test_sm120_block64.py
 COPY tests/test_exl3_pretune.py /opt/dsv41/test_exl3_pretune.py
 COPY tests/test_engram_dequant.py /opt/dsv41/test_engram_dequant.py
+COPY tests/test_yoco_metadata.py /opt/dsv41/test_yoco_metadata.py
 COPY scripts/pack_engram.py /opt/dsv41/pack_engram.py
 COPY scripts/boot-shape-warmup.sh /opt/dsv41/boot-shape-warmup.sh
 COPY scripts/pyspy_dump.sh /opt/dsv41/pyspy_dump.sh
@@ -190,6 +195,7 @@ RUN python3 /opt/dsv41/patch_spinwait.py --preflight || echo "WARN: spinwait pre
 RUN python3 /opt/dsv41/patch_h2d_stage.py
 RUN python3 /opt/dsv41/patch_sm120_block64.py
 RUN python3 /opt/dsv41/patch_memory_log.py
+RUN python3 /opt/dsv41/patch_yoco_prefill.py --check
 
 RUN EXL3_SELFCHECK_GPU=0 python3 /opt/dsv41/test_exl3_overlay.py \
     && python3 /opt/dsv41/test_suppress_stops.py \
@@ -203,7 +209,8 @@ RUN EXL3_SELFCHECK_GPU=0 python3 /opt/dsv41/test_exl3_overlay.py \
     && python3 /opt/dsv41/test_h2d_stage.py \
     && python3 /opt/dsv41/test_sm120_block64.py \
     && EXL3_SELFCHECK_GPU=0 python3 /opt/dsv41/test_exl3_pretune.py \
-    && python3 /opt/dsv41/test_engram_dequant.py
+    && python3 /opt/dsv41/test_engram_dequant.py \
+    && python3 /opt/dsv41/test_yoco_metadata.py
 RUN python3 /opt/dsv41/test_xgrammar_termination.py \
     || echo "WARN: xgrammar test skipped (patch may already be upstream)"
 

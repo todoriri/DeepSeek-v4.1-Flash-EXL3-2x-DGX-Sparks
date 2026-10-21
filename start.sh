@@ -156,6 +156,12 @@ KV_BLOCK_SIZE="${KV_BLOCK_SIZE:-64}"
 # The image defaults to 0 (latest reachable boundaries only), which can miss
 # completely when the DSpark block-drop guard needs an earlier checkpoint.
 PREFIX_CACHE_RETENTION_INTERVAL="${PREFIX_CACHE_RETENTION_INTERVAL-4096}"
+# Decoder-SWA bounded replay (DeepInfer YOCO prefill truncation), OFF by default; see
+# docs/yoco-prefill-truncation.md. compact = decoder layers 20-39 prefill only the last
+# DSV41_YOCO_KEEP_TOKENS positions (approximate, as DeepSeek serves it; prompt_logprobs
+# refused). Unset/off leaves the vLLM argv and the image's vLLM files untouched.
+DSV41_YOCO_PREFILL="${DSV41_YOCO_PREFILL-off}"
+DSV41_YOCO_KEEP_TOKENS="${DSV41_YOCO_KEEP_TOKENS-140}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-600000}"
 GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.88}"
 MAX_NUM_SEQS="${MAX_NUM_SEQS:-2}"
@@ -173,6 +179,8 @@ RESPONSES_PATCH_HOST="${RESPONSES_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_response
 EFFORT_PATCH_HOST="${EFFORT_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_reasoning_effort_mapping.py}"
 EXL3_OVERLAY_HOST="${EXL3_OVERLAY_HOST:-$SCRIPT_DIR/overlay/exl3.py}"
 KMAP_HOST="${KMAP_HOST:-$SCRIPT_DIR/files/exl3_k_map.json}"
+YOCO_PATCH_HOST="${YOCO_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_yoco_prefill.py}"
+YOCO_HELPER_HOST="${YOCO_HELPER_HOST:-$SCRIPT_DIR/overlay/dsv41_yoco.py}"
 QUANTIZATION="${QUANTIZATION:-exl3}"
 LANGUAGE_MODEL_ONLY="${LANGUAGE_MODEL_ONLY:-0}"
 SKIP_MM_PROFILING="${SKIP_MM_PROFILING:-1}"
@@ -403,6 +411,37 @@ _dsv41_validate_spec_and_heartbeat() {
     fi
 }
 
+_dsv41_validate_yoco() {
+    local mode="${DSV41_YOCO_PREFILL-off}" spec_k backtrack need
+    mode="${mode:-off}"
+    _glm53_validate_enum DSV41_YOCO_PREFILL "$mode" off compact || return
+    DSV41_YOCO_PREFILL="$mode"
+    export DSV41_YOCO_PREFILL
+    _glm53_canonical_positive_int DSV41_YOCO_KEEP_TOKENS \
+        "${DSV41_YOCO_KEEP_TOKENS-140}" 1048576 || return
+    [ "$mode" = compact ] || return 0
+    # DeepInfer: KEEP >= sliding window (128, config.json) + max backtracking, and
+    # a DSpark verify step can roll back num_speculative_tokens + 1 positions.
+    backtrack=1
+    if [ "${SPEC_METHOD:-dspark}" = "dspark" ]; then
+        spec_k="${DSPARK_TOKENS:-5}"
+        if ! [[ "$spec_k" =~ ^[0-9]+$ ]]; then
+            echo "DSPARK_TOKENS must be an integer (got: $spec_k)" >&2
+            return 2
+        fi
+        backtrack=$((10#$spec_k + 1))
+    fi
+    need=$((128 + backtrack))
+    if [ "$DSV41_YOCO_KEEP_TOKENS" -lt "$need" ]; then
+        echo "DSV41_YOCO_KEEP_TOKENS=$DSV41_YOCO_KEEP_TOKENS is below the sliding window (128) + max speculative backtrack ($backtrack) = $need" >&2
+        return 2
+    fi
+    if [ "${LANGUAGE_MODEL_ONLY:-0}" != "1" ]; then
+        echo "DSV41_YOCO_PREFILL=compact needs LANGUAGE_MODEL_ONLY=1 (vision-widened SWA windows are not supported)" >&2
+        return 2
+    fi
+}
+
 validate_numeric_config() {
     if ! [[ "$GPU_MEM_UTIL" =~ ^(0([.][0-9]+)?|[.][0-9]+|1([.]0+)?)$ ]] \
        || ! awk -v u="$GPU_MEM_UTIL" 'BEGIN { exit !(u > 0 && u <= 1) }'; then
@@ -417,6 +456,7 @@ validate_numeric_config() {
     _glm53_validate_spinwait_ms || return
     _dsv41_validate_prefix_retention || return
     _dsv41_validate_spec_and_heartbeat || return
+    _dsv41_validate_yoco || return
 }
 # GLM53 numeric config guard (end)
 
@@ -601,6 +641,8 @@ preflight() {
     [ -f "$EFFORT_PATCH_HOST" ] || die "$EFFORT_PATCH_HOST missing"
     [ -f "$EXL3_OVERLAY_HOST" ] || die "$EXL3_OVERLAY_HOST missing"
     [ -f "$KMAP_HOST" ] || die "$KMAP_HOST missing"
+    [ -f "$YOCO_PATCH_HOST" ] || die "$YOCO_PATCH_HOST missing"
+    [ -f "$YOCO_HELPER_HOST" ] || die "$YOCO_HELPER_HOST missing"
     [ -f "$CHAT_TEMPLATE_HOST" ] || die "$CHAT_TEMPLATE_HOST missing"
     fetch_weights
 
@@ -1267,6 +1309,10 @@ for p in /opt/dsv41/patch_suppress_stops_in_reasoning.py \
         python3 "$p" || say "WARN: $p returned $?"
     fi
 done
+if [ "${DSV41_YOCO_PREFILL:-off}" != "off" ]; then
+    say "YOCO prefill truncation: ${DSV41_YOCO_PREFILL} keep=${DSV41_YOCO_KEEP_TOKENS:-140} (decoder layers prefill the last N positions only)"
+    python3 /opt/dsv41/patch_yoco_prefill.py || { say "FATAL: YOCO prefill patch failed"; exit 1; }
+fi
 say "launching: vllm serve ${MODEL_DIR} ${ARGS[*]}"
 exec vllm serve "${MODEL_DIR}" "${ARGS[@]}"
 EOF
@@ -1365,6 +1411,10 @@ for p in /opt/dsv41/patch_suppress_stops_in_reasoning.py \
         python3 "$p" || say "WARN: $p returned $?"
     fi
 done
+if [ "${DSV41_YOCO_PREFILL:-off}" != "off" ]; then
+    say "YOCO prefill truncation: ${DSV41_YOCO_PREFILL} keep=${DSV41_YOCO_KEEP_TOKENS:-140} (decoder layers prefill the last N positions only)"
+    python3 /opt/dsv41/patch_yoco_prefill.py || { say "FATAL: YOCO prefill patch failed"; exit 1; }
+fi
 say "joining TP2 at ${HEAD_IP}:${MASTER_PORT} as rank 1"
 exec vllm serve "${MODEL_DIR}" "${ARGS[@]}"
 EOF
@@ -1457,6 +1507,8 @@ launch_cluster() {
     scp -q -o BatchMode=yes "$SCRIPT_DIR/overlay/patch_memory_log.py" "${WORKER_SSH}:/tmp/patch_memory_log.py"
     scp -q -o BatchMode=yes "$SCRIPT_DIR/overlay/patch_h2d_stage.py" "${WORKER_SSH}:/tmp/patch_h2d_stage.py"
     scp -q -o BatchMode=yes "$SCRIPT_DIR/overlay/patch_sm120_block64.py" "${WORKER_SSH}:/tmp/patch_sm120_block64.py"
+    scp -q -o BatchMode=yes "$YOCO_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_yoco_prefill.py"
+    scp -q -o BatchMode=yes "$YOCO_HELPER_HOST" "${WORKER_SSH}:/tmp/dsv41_yoco.py"
     scp -q -o BatchMode=yes "$MEMGUARD_HOST" "${WORKER_SSH}:/tmp/dsv41-memguard.sh"
 
     local -a nccl_common=(
@@ -1587,7 +1639,7 @@ launch_cluster() {
              DSV41_CACHE_WAYS DSV41_STATS_SECONDS KV_CACHE_MEMORY_BYTES KV_BLOCK_SIZE \
              DSV41_SKIP_MIXED_WARMUP DSV41_DROP_PAGE_CACHE \
              DSV41_PREFILL_EMPTY_CACHE_MEMAVAIL_GIB DSV41_PREFILL_END_EMPTY_CACHE VLLM_SPARSE_INDEXER_MAX_LOGITS_MB \
-             LONG_PREFILL_TOKEN_THRESHOLD; do
+             LONG_PREFILL_TOKEN_THRESHOLD DSV41_YOCO_PREFILL DSV41_YOCO_KEEP_TOKENS; do
         serve_env+=" -e $v='${!v:-}'"
     done
     serve_env+=" -e VLLM_API_KEY='${VLLM_API_KEY:-}'"
@@ -1636,6 +1688,8 @@ launch_cluster() {
         -v '/tmp/patch_memory_log.py:/opt/dsv41/patch_memory_log.py:ro' \
         -v '/tmp/patch_h2d_stage.py:/opt/dsv41/patch_h2d_stage.py:ro' \
         -v '/tmp/patch_sm120_block64.py:/opt/dsv41/patch_sm120_block64.py:ro' \
+        -v '/tmp/patch_yoco_prefill.py:/opt/dsv41/patch_yoco_prefill.py:ro' \
+        -v '/tmp/dsv41_yoco.py:/opt/dsv41/dsv41_yoco.py:ro' \
         ${worker_packed_args} \
         ${worker_preload} \
         ${worker_nccl} \
@@ -1677,6 +1731,8 @@ launch_cluster() {
         -v "$SCRIPT_DIR/overlay/patch_memory_log.py:/opt/dsv41/patch_memory_log.py:ro" \
         -v "$SCRIPT_DIR/overlay/patch_h2d_stage.py:/opt/dsv41/patch_h2d_stage.py:ro" \
         -v "$SCRIPT_DIR/overlay/patch_sm120_block64.py:/opt/dsv41/patch_sm120_block64.py:ro" \
+        -v "$YOCO_PATCH_HOST:/opt/dsv41/patch_yoco_prefill.py:ro" \
+        -v "$YOCO_HELPER_HOST:/opt/dsv41/dsv41_yoco.py:ro" \
         "${head_packed_args[@]}" \
         "${head_preload[@]}" \
         "${nccl_common[@]}" \
@@ -1695,6 +1751,8 @@ launch_cluster() {
         -e LONG_PREFILL_TOKEN_THRESHOLD="${LONG_PREFILL_TOKEN_THRESHOLD:-}" \
         -e KV_CACHE_DTYPE="$KV_CACHE_DTYPE" \
         -e PREFIX_CACHE_RETENTION_INTERVAL="$PREFIX_CACHE_RETENTION_INTERVAL" \
+        -e DSV41_YOCO_PREFILL="$DSV41_YOCO_PREFILL" \
+        -e DSV41_YOCO_KEEP_TOKENS="$DSV41_YOCO_KEEP_TOKENS" \
         -e SPEC_METHOD="$SPEC_METHOD" \
         -e DSPARK_TOKENS="${DSPARK_TOKENS:-5}" \
         -e LANGUAGE_MODEL_ONLY="$LANGUAGE_MODEL_ONLY" \

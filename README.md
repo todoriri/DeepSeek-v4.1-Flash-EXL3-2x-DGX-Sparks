@@ -320,6 +320,8 @@ higher) and restart.
 | `scripts/weight_budget.py` | per-rank resident weight bytes from the safetensors index (preflight headroom check) |
 | `scripts/effort_ab.py` | live A/B of reasoning-effort budgets on graded math + coding tasks |
 | `scripts/prefix_retention_agent.py` | live prefix-cache reuse vs ideal on agent-shaped sessions |
+| `overlay/patch_yoco_prefill.py`, `overlay/dsv41_yoco.py` | decoder-SWA bounded replay (YOCO prefill truncation), **off by default** (`DSV41_YOCO_PREFILL=compact`; [doc](docs/yoco-prefill-truncation.md)) |
+| `scripts/yoco_logprob_ab.py` | teacher-forced logprob / top-K A/B for the truncation trial (off-vs-off noise floor) |
 
 ## Engram
 
@@ -425,6 +427,23 @@ tool-using agent sessions (append, fork, interleaved, thinking-on) reused 96–9
 of the ideal prefix with no warm zero-hits; see
 [the 2026-09-23 validation](docs/effort-and-retention-validation-20260923.md).
 
+## Prefill truncation (YOCO) — prepared, off by default
+
+`DSV41_YOCO_PREFILL=compact` ports DeepInfer's decoder-SWA bounded replay. Prefill runs
+the 20 decoder layers (20-39) only on the last `DSV41_YOCO_KEEP_TOKENS` (140) positions.
+Layer 20 still writes the compressed and index KV for every token.
+
+The result is approximate, which DeepSeek accepts in production, and these come with it:
+
+- `prompt_logprobs` is refused;
+- prefix-cache hits stop 204-331 tokens before the prompt end;
+- start.sh requires `LANGUAGE_MODEL_ONLY=1` and KEEP >= 128 + `DSPARK_TOKENS` + 1.
+
+Unset or `off` is today's launch: the vLLM argv is byte-identical and the patch does not run.
+It has not been deployed. The design, the prefix-cache and DSpark analysis, and the
+operator's maintenance-window plan are in
+[docs/yoco-prefill-truncation.md](docs/yoco-prefill-truncation.md).
+
 ## CX7
 
 Pins on this pair: spark1 `enp1s0f1np1`/`rocep1s0f1` ↔
@@ -451,6 +470,18 @@ python3 scripts/weight_budget.py --tp 2
 python3 extensions/cooperative_moe/test_dispatch.py
 python3 extensions/cooperative_moe/test_profile.py
 python3 extensions/cooperative_moe/test_build.py
+```
+
+The YOCO prefill-truncation tests need `torch` and `numpy` (CPU), but not vLLM. One
+of them is the L1 port of DeepInfer's mask/compact metadata check. Another runs the
+patch against the image's own files (`tests/fixtures/dsv41_yoco/`):
+
+```bash
+python3 tests/test_yoco_metadata.py
+python3 tests/test_yoco_driver.py
+python3 tests/test_yoco_prefill_patch.py
+python3 tests/test_yoco_launcher.py
+python3 tests/test_yoco_logprob_ab.py
 ```
 
 The chat-template parity harness needs `transformers` **and** the original
