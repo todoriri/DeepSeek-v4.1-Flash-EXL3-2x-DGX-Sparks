@@ -320,6 +320,7 @@ higher) and restart.
 | `scripts/memguard.sh` | per-node MemAvailable watchdog, **off by default** (`DSV41_MEM_GUARD=1` arms it) |
 | `scripts/weight_budget.py` | per-rank resident weight bytes from the safetensors index (preflight headroom check) |
 | `scripts/effort_ab.py` | live A/B of reasoning-effort budgets on graded math + coding tasks |
+| `scripts/deepinfer_bench.py`, `scripts/vendor/deepinfer_eval/` | DeepSeek's AIME 2026 / GPQA Diamond protocol (DeepInfer `eval/`, vendored verbatim) over the chat API, rule judge, idle-gated + budgeted, resumable ([doc](docs/deepinfer-bench-protocol.md)) |
 | `scripts/control_token_probe.py` | live `/tokenize` probe for control-token injection (+ clean-id baseline `--save`/`--compare`) |
 | `scripts/prefix_retention_agent.py` | live prefix-cache reuse vs ideal on agent-shaped sessions |
 | `overlay/patch_yoco_prefill.py`, `overlay/dsv41_yoco.py` | decoder-SWA bounded replay (YOCO prefill truncation), **off by default** (`DSV41_YOCO_PREFILL=compact`; [doc](docs/yoco-prefill-truncation.md)) |
@@ -563,12 +564,18 @@ requests, and `effort_ab.py` runs model-written code under `unshare -rn`):
 ```bash
 python3 scripts/effort_ab.py --base http://<head>:${PORT} --reps 2 --concurrency 2
 python3 scripts/prefix_retention_agent.py --base http://<head>:${PORT}
+python3 scripts/deepinfer_bench.py run --bench aime --data-file D/aime_2026.jsonl --out-dir RUN --efforts max --limit 30 --dry-run
 ```
 
 `effort_ab.py` A/Bs integer reasoning budgets (default 50 vs 75) on graded math
 and coding tasks; `prefix_retention_agent.py` compares `cached_tokens` with the
 ideal `/tokenize` prefix across agent-shaped sessions. Results from 2026-09-23:
 [docs/effort-and-retention-validation-20260923.md](docs/effort-and-retention-validation-20260923.md).
+`deepinfer_bench.py` runs DeepSeek's own AIME 2026 / GPQA Diamond prompts and rule judge
+against the head; DeepInfer's reference Pass@1 for V4.1 is AIME 2026 99.9% and GPQA Diamond
+93.4% (full protocol, effort 100). It waits for an idle teacher and stops at a token/time budget;
+dataset prep, budgets and wall-clock: [docs/deepinfer-bench-protocol.md](docs/deepinfer-bench-protocol.md).
+Its offline test needs no API: `python3 tests/test_deepinfer_bench.py`.
 
 The image build runs thirteen in-image tests (EXL3 overlay with
 `EXL3_SELFCHECK_GPU=0`, suppress-stops, scheduler decode floor, spinwait, Engram

@@ -1,0 +1,14 @@
+{
+  "repo": "https://github.com/deepseek-ai/DeepInfer",
+  "commit": "774ce244b87cc0eb8d4b94ab9f5de2ab22049f01",
+  "license": "Apache-2.0",
+  "path": "eval/",
+  "modified": false,
+  "files": {
+    "common/__init__.py": "5384bfdb2df380b6557cc7a71d16891415bccaa87699406e236f752c6415389f",
+    "common/io.py": "cfeacd6f06570bcf0649b9a14557f0a8e6adbb61fa1b976edafd9d49e57c2d79",
+    "common/passk.py": "aee51e7d444205c49cbcef815e62dd918b9d98726a04e1c388c8a2695869c7f7",
+    "aime/bench.py": "9f7fe427bf0377735e299d90a79445f4ca39cb06ac97397a5e4a94ef442789a6",
+    "gpqa/bench.py": "329611f34d5f138229b6f85407f8b63c7c38fd3c1b95f5115d965462ab3a7dda"
+  }
+}
