@@ -309,6 +309,7 @@ higher) and restart.
 | `overlay/patch_exl3_lm_head.py` | packed `wo_a` through `quant_method.apply` in the CUDA o-proj and the DSpark draft loader |
 | `overlay/engram_file_backend.py`, `overlay/row_store.cpp` | file-backed `ParallelEngramEmbedding` |
 | `overlay/patch_reasoning_effort_mapping.py` | `deepseek_v41` encoder effort names → official low=50 / high=75 / max=100 (runtime patch, both ranks) |
+| `overlay/patch_control_token_injection.py` | `deepseek_v41` prompts: control tokens only where the encoder inserted them; control-token text in request content encodes as plain text (runtime patch, both ranks; [doc](docs/control-token-injection-20261020.md)) |
 | `extensions/cooperative_moe/` | Optional decode MoE; not loaded unless `EXL3_OVERLAY_HOST` selects its overlay |
 | `files/exl3_k_map.json` | Per-tensor K |
 | `files/chat_template.jinja` | Port of DeepSeek `encoding.py` (parity reference; not used at serve time under `--tokenizer-mode deepseek_v41`) |
@@ -319,6 +320,7 @@ higher) and restart.
 | `scripts/memguard.sh` | per-node MemAvailable watchdog, **off by default** (`DSV41_MEM_GUARD=1` arms it) |
 | `scripts/weight_budget.py` | per-rank resident weight bytes from the safetensors index (preflight headroom check) |
 | `scripts/effort_ab.py` | live A/B of reasoning-effort budgets on graded math + coding tasks |
+| `scripts/control_token_probe.py` | live `/tokenize` probe for control-token injection (+ clean-id baseline `--save`/`--compare`) |
 | `scripts/prefix_retention_agent.py` | live prefix-cache reuse vs ideal on agent-shaped sessions |
 | `overlay/patch_yoco_prefill.py`, `overlay/dsv41_yoco.py` | decoder-SWA bounded replay (YOCO prefill truncation), **off by default** (`DSV41_YOCO_PREFILL=compact`; [doc](docs/yoco-prefill-truncation.md)) |
 | `scripts/yoco_logprob_ab.py` | teacher-forced logprob / top-K A/B for the truncation trial (off-vs-off noise floor) |
@@ -427,6 +429,20 @@ tool-using agent sessions (append, fork, interleaved, thinking-on) reused 96–9
 of the ideal prefix with no warm zero-hits; see
 [the 2026-09-23 validation](docs/effort-and-retention-validation-20260923.md).
 
+## Control tokens in request text
+
+The image's `deepseek_v41` tokenizer renders the chat to one string and HF-encodes it.
+Added tokens match anywhere in that string, so `</think>`, `<｜end▁of▁sentence｜>`,
+`｜DSML｜` or `<｜User｜>` inside user text, tool results or tool-call arguments became
+real control tokens. This was confirmed live on 2026-10-20 on every surface, including via
+`chat_template_kwargs: {"tokenize": false}`.
+
+`overlay/patch_control_token_injection.py` (runtime, both ranks) keeps control tokens to
+the positions the encoder inserted them. Text holding added-token strings is encoded with
+the base vocabulary. Ordinary prompts are encoded by the same call as before. **Not yet
+deployed on the live kit.** Finding, design, verification and deploy steps:
+[docs/control-token-injection-20261020.md](docs/control-token-injection-20261020.md).
+
 ## Prefill truncation (YOCO) — prepared, off by default
 
 `DSV41_YOCO_PREFILL=compact` ports DeepInfer's decoder-SWA bounded replay. Prefill runs
@@ -491,6 +507,16 @@ python3 scripts/weight_budget.py --tp 2
 python3 extensions/cooperative_moe/test_dispatch.py
 python3 extensions/cooperative_moe/test_profile.py
 python3 extensions/cooperative_moe/test_build.py
+```
+
+The control-token guard test runs the image's own `deepseek_v41` tokenizer
+sources (`tests/fixtures/dsv41_tokenizer/`) and needs `transformers>=5` +
+`tokenizers`. It uses the real tokenizer when `DSV41_TOKENIZER_DIR` (or `/model`)
+holds `tokenizer.json`, and a synthetic one with the V4.1 ids otherwise:
+
+```bash
+DSV41_TOKENIZER_DIR=/path/to/DeepSeek-V4.1-Flash python3 tests/test_control_token_injection.py
+python3 scripts/control_token_probe.py --base http://<head>:${PORT}   # live, /tokenize only
 ```
 
 The YOCO prefill-truncation tests need `torch` and `numpy` (CPU), but not vLLM. One
