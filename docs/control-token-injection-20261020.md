@@ -219,6 +219,12 @@ Pre-existing output-side gaps the patch does **not** change (noted, not fixed):
 2. Tool markers (`<｜DSML｜ calls>`, invoke and parameter tags) are matched by text in both modes.
    A BPE-spelled `｜DSML｜` in model output can still open a tool call.
 
+Both are traced, and fixed for non-streaming, in
+[output-token-split-20261022.md](output-token-split-20261022.md)
+(`overlay/patch_output_token_split.py`, prepared, not deployed). The same trace explains the
+quoted `<｜end▁of▁sentence｜>` drop below: the engine drops BOS/EOS **by text** when it has no
+ids (`_build_drop_info`). Gap 2 stays open in streaming.
+
 ## Verification
 
 ### Tests
@@ -460,7 +466,9 @@ completions were its own `</think>` (128822) and EOS (`output-side.txt`).
   [Output side](#output-side-unchanged): the non-streaming parse matches text, not ids.
   - A quoted `<think>draft</think>` in a thinking-off answer moved `draft` into `reasoning`.
   - Quoted `</think>` and `<｜end▁of▁sentence｜>` were missing from `content`. The
-    `<｜end▁of▁sentence｜>` drop is not covered by gap 1's description; its cause was not traced.
+    `<｜end▁of▁sentence｜>` drop is not covered by gap 1's description. Traced on 2026-10-22: the
+    engine registers BOS/EOS as DROP terminals by id and by text, and non-streaming has no ids
+    ([output-token-split-20261022.md](output-token-split-20261022.md)).
   - In one thinking-on sample (temperature 1.0), the model quoted `</think>` inside its
     reasoning. The rest of the reasoning came back as `content`.
 - **The guard does not cause this.** It rewrites only `tokenizers/deepseek_v41.py`, not the

@@ -183,6 +183,7 @@ SPINWAIT_PATCH_HOST="${SPINWAIT_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_spinwait.p
 RESPONSES_PATCH_HOST="${RESPONSES_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_responses_content_types.py}"
 EFFORT_PATCH_HOST="${EFFORT_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_reasoning_effort_mapping.py}"
 CONTROL_TOKEN_PATCH_HOST="${CONTROL_TOKEN_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_control_token_injection.py}"
+OUTPUT_SPLIT_PATCH_HOST="${OUTPUT_SPLIT_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_output_token_split.py}"
 EXL3_OVERLAY_HOST="${EXL3_OVERLAY_HOST:-$SCRIPT_DIR/overlay/exl3.py}"
 KMAP_HOST="${KMAP_HOST:-$SCRIPT_DIR/files/exl3_k_map.json}"
 YOCO_PATCH_HOST="${YOCO_PATCH_HOST:-$SCRIPT_DIR/overlay/patch_yoco_prefill.py}"
@@ -656,6 +657,7 @@ preflight() {
     [ -f "$RESPONSES_PATCH_HOST" ] || die "$RESPONSES_PATCH_HOST missing"
     [ -f "$EFFORT_PATCH_HOST" ] || die "$EFFORT_PATCH_HOST missing"
     [ -f "$CONTROL_TOKEN_PATCH_HOST" ] || die "$CONTROL_TOKEN_PATCH_HOST missing"
+    [ -f "$OUTPUT_SPLIT_PATCH_HOST" ] || die "$OUTPUT_SPLIT_PATCH_HOST missing"
     [ -f "$EXL3_OVERLAY_HOST" ] || die "$EXL3_OVERLAY_HOST missing"
     [ -f "$KMAP_HOST" ] || die "$KMAP_HOST missing"
     [ -f "$YOCO_PATCH_HOST" ] || die "$YOCO_PATCH_HOST missing"
@@ -1317,6 +1319,7 @@ for p in /opt/dsv41/patch_suppress_stops_in_reasoning.py \
          /opt/dsv41/patch_responses_content_types.py \
          /opt/dsv41/patch_reasoning_effort_mapping.py \
          /opt/dsv41/patch_control_token_injection.py \
+         /opt/dsv41/patch_output_token_split.py \
          /opt/dsv41/patch_exl3_packed_names.py \
          /opt/dsv41/patch_exl3_lm_head.py \
          /opt/dsv41/patch_engram_secondary.py \
@@ -1424,6 +1427,7 @@ for p in /opt/dsv41/patch_suppress_stops_in_reasoning.py \
          /opt/dsv41/patch_responses_content_types.py \
          /opt/dsv41/patch_reasoning_effort_mapping.py \
          /opt/dsv41/patch_control_token_injection.py \
+         /opt/dsv41/patch_output_token_split.py \
          /opt/dsv41/patch_exl3_packed_names.py \
          /opt/dsv41/patch_exl3_lm_head.py \
          /opt/dsv41/patch_engram_secondary.py \
@@ -1525,6 +1529,7 @@ launch_cluster() {
     scp -q -o BatchMode=yes "$RESPONSES_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_responses_content_types.py"
     scp -q -o BatchMode=yes "$EFFORT_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_reasoning_effort_mapping.py"
     scp -q -o BatchMode=yes "$CONTROL_TOKEN_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_control_token_injection.py"
+    scp -q -o BatchMode=yes "$OUTPUT_SPLIT_PATCH_HOST" "${WORKER_SSH}:/tmp/patch_output_token_split.py"
     scp -q -o BatchMode=yes "$EXL3_OVERLAY_HOST" "${WORKER_SSH}:/tmp/dsv41-exl3.py"
     scp -q -o BatchMode=yes "$KMAP_HOST" "${WORKER_SSH}:/tmp/exl3_k_map.json"
     scp -q -o BatchMode=yes "$SCRIPT_DIR/overlay/patch_exl3_packed_names.py" "${WORKER_SSH}:/tmp/patch_exl3_packed_names.py"
@@ -1709,6 +1714,7 @@ launch_cluster() {
         -v '/tmp/patch_responses_content_types.py:/opt/dsv41/patch_responses_content_types.py:ro' \
         -v '/tmp/patch_reasoning_effort_mapping.py:/opt/dsv41/patch_reasoning_effort_mapping.py:ro' \
         -v '/tmp/patch_control_token_injection.py:/opt/dsv41/patch_control_token_injection.py:ro' \
+        -v '/tmp/patch_output_token_split.py:/opt/dsv41/patch_output_token_split.py:ro' \
         -v '/tmp/dsv41-exl3.py:/opt/dsv41/exl3.py:ro' \
         -v '/tmp/exl3_k_map.json:/opt/dsv41/exl3_k_map.json:ro' \
         -v '/tmp/patch_exl3_packed_names.py:/opt/dsv41/patch_exl3_packed_names.py:ro' \
@@ -1754,6 +1760,7 @@ launch_cluster() {
         -v "$RESPONSES_PATCH_HOST:/opt/dsv41/patch_responses_content_types.py:ro" \
         -v "$EFFORT_PATCH_HOST:/opt/dsv41/patch_reasoning_effort_mapping.py:ro" \
         -v "$CONTROL_TOKEN_PATCH_HOST:/opt/dsv41/patch_control_token_injection.py:ro" \
+        -v "$OUTPUT_SPLIT_PATCH_HOST:/opt/dsv41/patch_output_token_split.py:ro" \
         -v "$EXL3_OVERLAY_HOST:/opt/dsv41/exl3.py:ro" \
         -v "$KMAP_HOST:/opt/dsv41/exl3_k_map.json:ro" \
         -v "$SCRIPT_DIR/overlay/patch_exl3_packed_names.py:/opt/dsv41/patch_exl3_packed_names.py:ro" \

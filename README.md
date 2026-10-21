@@ -322,6 +322,7 @@ higher) and restart.
 | `overlay/engram_file_backend.py`, `overlay/row_store.cpp` | file-backed `ParallelEngramEmbedding` |
 | `overlay/patch_reasoning_effort_mapping.py` | `deepseek_v41` encoder effort names → official low=50 / high=75 / max=100 (runtime patch, both ranks) |
 | `overlay/patch_control_token_injection.py` | `deepseek_v41` prompts: control tokens only where the encoder inserted them; control-token text in request content encodes as plain text (runtime patch, both ranks; [doc](docs/control-token-injection-20261020.md)) |
+| `overlay/patch_output_token_split.py` | non-streaming parse (chat, batch, Responses): control-token strings the model spelled with ordinary tokens stay text, as in streaming; real control tokens and clean outputs unchanged (runtime, both ranks; prepared, not deployed; [doc](docs/output-token-split-20261022.md)) |
 | `extensions/cooperative_moe/` | Optional decode MoE; not loaded unless `EXL3_OVERLAY_HOST` selects its overlay |
 | `files/exl3_k_map.json` | Per-tensor K |
 | `files/chat_template.jinja` | Port of DeepSeek `encoding.py` (parity reference; not used at serve time under `--tokenizer-mode deepseek_v41`) |
@@ -470,6 +471,15 @@ answer that quotes those strings comes back mangled. Streaming keeps the quotes.
 incident, design, verification and the deploy record:
 [docs/control-token-injection-20261020.md](docs/control-token-injection-20261020.md).
 
+That output-side mangling is traced in
+[docs/output-token-split-20261022.md](docs/output-token-split-20261022.md).
+`DelegatingParser.parse` ignores the output ids and matches `<think>`/`</think>` by text. It
+also drops BOS/EOS by text, which is why a quoted `<｜end▁of▁sentence｜>` vanished. A quoted
+`<｜DSML｜ calls>` block even comes back as a tool call. `overlay/patch_output_token_split.py`
+masks the strings that the ids show the model spelled with ordinary tokens, runs the image's
+parse unchanged, and restores them. It is tested on the image's real chat serving code and is
+**not deployed**. Streaming still matches DSML markers by text.
+
 ## Prefill truncation (YOCO) — live on the gb10 kit since 2026-10-21
 
 `DSV41_YOCO_PREFILL=compact` ports DeepInfer's decoder-SWA bounded replay. Prefill runs
@@ -566,6 +576,8 @@ DSV41_TOKENIZER_DIR=/path/to/DeepSeek-V4.1-Flash python3 tests/test_control_toke
 scripts/dsv41_vllm_tree.sh /tmp/dsv41-vllm   # once; read-only on gb10
 DSV41_VLLM_TREE=/tmp/dsv41-vllm DSV41_VLLM_PYTHON=/tmp/dsv41-vllm/venv/bin/python \
   DSV41_TOKENIZER_DIR=/path/to/DeepSeek-V4.1-Flash python3 tests/test_control_token_render_path.py
+DSV41_VLLM_TREE=/tmp/dsv41-vllm DSV41_VLLM_PYTHON=/tmp/dsv41-vllm/venv/bin/python \
+  DSV41_TOKENIZER_DIR=/path/to/DeepSeek-V4.1-Flash python3 tests/test_output_token_split.py
 python3 scripts/control_token_probe.py --base http://<head>:${PORT}   # live; chat arm = 12 one-token requests
 ```
 
