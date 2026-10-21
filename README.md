@@ -333,7 +333,8 @@ higher) and restart.
 | `scripts/weight_budget.py` | per-rank resident weight bytes from the safetensors index (preflight headroom check) |
 | `scripts/effort_ab.py` | live A/B of reasoning-effort budgets on graded math + coding tasks |
 | `scripts/deepinfer_bench.py`, `scripts/vendor/deepinfer_eval/` | DeepSeek's AIME 2026 / GPQA Diamond protocol (DeepInfer `eval/`, vendored verbatim) over the chat API, rule judge, idle-gated + budgeted, resumable ([doc](docs/deepinfer-bench-protocol.md)) |
-| `scripts/control_token_probe.py` | live `/tokenize` probe for control-token injection (+ clean-id baseline `--save`/`--compare`) |
+| `scripts/control_token_probe.py` | live control-token injection probe: `/tokenize` + a chat-completions arm (`max_tokens=1`), clean-id baseline `--save`/`--compare` |
+| `scripts/dsv41_vllm_tree.sh` | the image's vLLM Python tree + a CPU venv with its pins, for `tests/test_control_token_render_path.py` (read-only on gb10) |
 | `scripts/prefix_retention_agent.py` | live prefix-cache reuse vs ideal on agent-shaped sessions |
 | `overlay/patch_yoco_prefill.py`, `overlay/dsv41_yoco.py` | decoder-SWA bounded replay (YOCO prefill truncation), **off by default** (`DSV41_YOCO_PREFILL=compact`; [doc](docs/yoco-prefill-truncation.md)) |
 | `scripts/yoco_logprob_ab.py` | teacher-forced logprob / top-K A/B for the truncation trial (off-vs-off noise floor) |
@@ -447,13 +448,23 @@ of the ideal prefix with no warm zero-hits; see
 The image's `deepseek_v41` tokenizer renders the chat to one string and HF-encodes it.
 Added tokens match anywhere in that string, so `</think>`, `<｜end▁of▁sentence｜>`,
 `｜DSML｜` or `<｜User｜>` inside user text, tool results or tool-call arguments became
-real control tokens. This was confirmed live on 2026-10-20 on every surface, including via
-`chat_template_kwargs: {"tokenize": false}`.
+real control tokens. This was confirmed live on 2026-10-20 on every surface.
 
 `overlay/patch_control_token_injection.py` (runtime, both ranks) keeps control tokens to
 the positions the encoder inserted them. Text holding added-token strings is encoded with
-the base vocabulary. Ordinary prompts are encoded by the same call as before. **Not yet
-deployed on the live kit.** Finding, design, verification and deploy steps:
+the base vocabulary. Ordinary prompts give the same ids as before.
+
+**Trialled live on 2026-10-21 (maintenance arm A1) and reverted.** The first version
+refused `tokenize=false` with control text (HTTP 400), to close what looked like a bypass.
+But the server itself always calls the template with `tokenize=False`: in
+`OnlineRenderer.preprocess_chat`, the renderer encodes the returned string. So every chat,
+`/tokenize` and Responses request holding control text got HTTP 400. An agent session with
+such a tool result in its history failed on every later turn. Clean prompts were
+id-identical.
+
+The fix returns the guarded token ids on that path, and clean prompts still return the same
+string. A new test runs the image's real serving code on CPU. **Not redeployed:** the live
+kit runs without the guard. Finding, A1 incident, design, verification and deploy steps:
 [docs/control-token-injection-20261020.md](docs/control-token-injection-20261020.md).
 
 ## Prefill truncation (YOCO) — live on the gb10 kit since 2026-10-21
@@ -537,14 +548,22 @@ python3 extensions/cooperative_moe/test_profile.py
 python3 extensions/cooperative_moe/test_build.py
 ```
 
-The control-token guard test runs the image's own `deepseek_v41` tokenizer
-sources (`tests/fixtures/dsv41_tokenizer/`) and needs `transformers>=5` +
-`tokenizers`. It uses the real tokenizer when `DSV41_TOKENIZER_DIR` (or `/model`)
-holds `tokenizer.json`, and a synthetic one with the V4.1 ids otherwise:
+The control-token guard tests run the image's own `deepseek_v41` tokenizer
+sources (`tests/fixtures/dsv41_tokenizer/`) and need `transformers>=5` +
+`tokenizers`. They use the real tokenizer when `DSV41_TOKENIZER_DIR` (or `/model`)
+holds `tokenizer.json`, and a synthetic one with the V4.1 ids otherwise.
+
+The render-path test runs the image's real serving code (chat, `/tokenize`, Responses)
+on CPU. It needs the image's vLLM tree and pins from `scripts/dsv41_vllm_tree.sh`, and
+prints a skip line without them:
 
 ```bash
 DSV41_TOKENIZER_DIR=/path/to/DeepSeek-V4.1-Flash python3 tests/test_control_token_injection.py
-python3 scripts/control_token_probe.py --base http://<head>:${PORT}   # live, /tokenize only
+DSV41_TOKENIZER_DIR=/path/to/DeepSeek-V4.1-Flash python3 tests/test_control_token_probe.py
+scripts/dsv41_vllm_tree.sh /tmp/dsv41-vllm   # once; read-only on gb10
+DSV41_VLLM_TREE=/tmp/dsv41-vllm DSV41_VLLM_PYTHON=/tmp/dsv41-vllm/venv/bin/python \
+  DSV41_TOKENIZER_DIR=/path/to/DeepSeek-V4.1-Flash python3 tests/test_control_token_render_path.py
+python3 scripts/control_token_probe.py --base http://<head>:${PORT}   # live; chat arm = 12 one-token requests
 ```
 
 The YOCO prefill-truncation tests need `torch` and `numpy` (CPU), but not vLLM. One

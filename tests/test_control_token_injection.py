@@ -12,6 +12,12 @@ start.sh runtime patches applied in start.sh order) on a real HF tokenizer:
 ``DSV41_TOKENIZER_DIR`` or ``/model`` when it holds tokenizer.json, otherwise
 a synthetic byte-level tokenizer carrying the V4.1 control-token ids.
 Needs transformers>=5 (TokenizersBackend) and tokenizers.
+
+Each surface is checked both as a direct call (``_render``) and the way the
+server calls it (``_served``: ``tokenize=False``, then the renderer encodes
+the returned string). Only the direct call was checked when the guard first
+went live, on 2026-10-21 arm A1, and every dirty request got HTTP 400.
+tests/test_control_token_render_path.py runs the image's real serving code.
 """
 from __future__ import annotations
 
@@ -192,7 +198,7 @@ def env() -> _Env:
 
 
 def _render(tokenizer, messages, tools=None, **chat_kwargs):
-    # The renderer's call: renderers/deepseek_v4.py + params.get_apply_chat_template_kwargs().
+    # A direct call (tokenize defaults to True), as an offline caller would make it.
     return tokenizer.apply_chat_template(
         conversation=[],
         messages=messages,
@@ -201,6 +207,28 @@ def _render(tokenizer, messages, tools=None, **chat_kwargs):
         return_dict=False,
         **chat_kwargs,
     )
+
+
+def _served(tokenizer, messages, tools=None, **request_kwargs) -> list[int]:
+    """The prompt ids the server builds for a chat, /tokenize or Responses request.
+
+    OnlineRenderer.preprocess_chat merges ``tools`` and ``tokenize=False`` under the
+    request's chat_template_kwargs (None values dropped), DeepseekV4Renderer calls
+    apply_chat_template, and BaseRenderer encodes a returned string with the full
+    vocabulary. A token list goes to the engine as is. (The 2026-10-21 A1 arm
+    missed this: _render alone never passes tokenize=False.)
+    tests/test_control_token_render_path.py runs the image's real code for this.
+    """
+    kwargs = {"tools": tools, "tokenize": False}
+    request = dict(add_generation_prompt=True, continue_final_message=False, **request_kwargs)
+    kwargs.update({key: value for key, value in request.items() if value not in (None, "auto")})
+    raw = tokenizer.apply_chat_template(
+        conversation=[], messages=messages, chat_template=None, return_dict=False, **kwargs
+    )
+    if isinstance(raw, str):
+        return tokenizer(raw, add_special_tokens=False)["input_ids"]
+    assert isinstance(raw, list) and all(type(token_id) is int for token_id in raw), raw
+    return raw
 
 
 def _control(ids: list[int]) -> list[int]:
@@ -364,17 +392,24 @@ def test_probe_content_is_ordinary_text() -> None:
     assert e.guarded.decode(content) == PROBE
 
 
+def test_unpatched_served_path_injects() -> None:
+    """The same bug on the path the server takes (stays green)."""
+    ids = _served(env().legacy, [{"role": "user", "content": PROBE}], enable_thinking=False)
+    assert {1, 128822, 128825} <= set(ids[2:-2]), ids
+
+
 def test_every_surface_keeps_only_template_tokens() -> None:
     e = env()
-    for mode in MODES:
-        dirty_cases, twin_cases = _cases(DIRTY), _cases("plain text")
-        for name, (messages, tools) in dirty_cases.items():
-            twin_messages, twin_tools = twin_cases[name]
-            ids = _render(e.guarded, messages, tools, **mode)
-            expected = _control(_render(e.legacy, twin_messages, twin_tools, **mode))
-            assert _control(ids) == expected, (name, mode, _control(ids), expected)
-            prompt = _render(e.legacy, messages, tools, tokenize=False, **mode)
-            assert e.guarded.decode(ids) == prompt, (name, mode)
+    for path in (_render, _served):
+        for mode in MODES:
+            dirty_cases, twin_cases = _cases(DIRTY), _cases("plain text")
+            for name, (messages, tools) in dirty_cases.items():
+                twin_messages, twin_tools = twin_cases[name]
+                ids = path(e.guarded, messages, tools, **mode)
+                expected = _control(path(e.legacy, twin_messages, twin_tools, **mode))
+                assert _control(ids) == expected, (path.__name__, name, mode, _control(ids), expected)
+                prompt = _render(e.legacy, messages, tools, tokenize=False, **mode)
+                assert e.guarded.decode(ids) == prompt, (path.__name__, name, mode)
 
 
 def _outcome(tokenizer, messages, tools, **kwargs):
@@ -395,15 +430,27 @@ def test_ordinary_prompts_are_id_identical() -> None:
                     assert guarded == legacy, (name, mode, text, extra)
 
 
-def test_tokenize_false_cannot_smuggle_dirty_text() -> None:
-    # A request-level chat_template_kwargs {"tokenize": false} makes the
-    # renderer re-encode the returned string with the plain tokenizer.
-    try:
-        _render(env().guarded, [{"role": "user", "content": PROBE}], tokenize=False)
-    except ValueError as error:
-        assert "tokenize" in str(error)
-    else:
-        raise AssertionError("dirty prompt returned as text")
+def test_tokenize_false_returns_guarded_ids() -> None:
+    # tokenize=False is the server's default, and a request's explicit
+    # "tokenize": false merges to the same value. A string would be re-encoded
+    # with the full vocabulary, and refusing it refused every such request
+    # (A1), so a dirty prompt comes back as the guarded ids.
+    e = env()
+    messages = [{"role": "user", "content": PROBE}]
+    ids = _render(e.guarded, messages, enable_thinking=False)
+    assert _render(e.guarded, messages, enable_thinking=False, tokenize=False) == ids
+    for extra in ({}, {"tokenize": False}, {"tokenize": True}, {"tokenize": None}):
+        assert _served(e.guarded, messages, enable_thinking=False, **extra) == ids, extra
+    # On this path truncation belongs to the renderer (TokenizeParams), as it did
+    # for the string; chat_template_kwargs truncation/max_length never applied.
+    truncated = _render(e.guarded, messages, enable_thinking=False, tokenize=False, truncation=True, max_length=9)
+    assert truncated == ids, truncated
+    # Same truthiness as the stock template: any falsy tokenize asks for a string.
+    clean = [{"role": "user", "content": CLEAN}]
+    for falsy in (None, 0):
+        prompt = _render(e.guarded, clean, enable_thinking=False, tokenize=falsy)
+        assert prompt == _render(e.legacy, clean, enable_thinking=False, tokenize=falsy), falsy
+        assert _render(e.guarded, messages, enable_thinking=False, tokenize=falsy) == ids, falsy
 
 
 def test_diverged_encoder_refused() -> None:

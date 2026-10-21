@@ -18,10 +18,18 @@ as before (same call, same ids).  Otherwise it is encoded segment-wise:
 template tokens straight to their ids, every text segment with the base
 vocabulary only (a copy of the tokenizer without added tokens), which is
 what DeepInfer's doc says DeepSeek's own serving does (the open-source
-deepseek-recipe 0.1.1 still encodes the flat string).  A request-level
-``chat_template_kwargs: {"tokenize": false}`` with such text is refused,
-because the renderer would re-encode the returned string with the plain
-tokenizer.  Output parsing is untouched: the parsers resolve ``<think>`` /
+deepseek-recipe 0.1.1 still encodes the flat string).
+
+The server always asks for a string: ``OnlineRenderer.preprocess_chat``
+merges ``tokenize=False`` under the request's chat_template_kwargs (chat,
+/tokenize and Responses alike), and the renderer encodes that string with
+the full vocabulary.  So with ``tokenize`` false a clean prompt is returned
+as today's string, and a prompt holding control-token text is returned as
+the guarded ids, which ``parse_dec_only_prompt`` accepts as a TokensPrompt.
+A request's explicit ``"tokenize": false`` is indistinguishable from that
+default and gets the same ids.  (The first version refused it with
+HTTP 400, which on the live server refused every such request: 2026-10-21
+arm A1.)  Output parsing is untouched: the parsers resolve ``<think>`` /
 ``</think>`` through ``get_vocab()`` and match by id.
 """
 from __future__ import annotations
@@ -147,13 +155,13 @@ class _ControlTokenGuard:
             raise ValueError("DeepSeek V4.1 control-token guard: marked render differs")
         dirty = any(self._scan.search(text) for text in texts)
         if not kwargs.get("tokenize", True):
-            if dirty:
-                raise ValueError(
-                    "DeepSeek V4.1: message text contains control-token strings that "
-                    "tokenize=False would turn into control tokens; remove 'tokenize' "
-                    "from chat_template_kwargs"
-                )
-            return prompt
+            # The served path: OnlineRenderer.preprocess_chat defaults tokenize to
+            # False (a request's own "tokenize": false is the same value), and the
+            # renderer encodes a returned string with the full vocabulary. A clean
+            # prompt goes back as that string, unchanged. A dirty one goes back as
+            # ids: parse_dec_only_prompt makes them a TokensPrompt, which is never
+            # re-encoded and still gets the request's truncation and length checks.
+            return self._encode_segments(texts, tokens) if dirty else prompt
         options = {key: kwargs[key] for key in ("truncation", "max_length") if key in kwargs}
         if not dirty:
             return tokenizer.encode(prompt, add_special_tokens=False, **options)
