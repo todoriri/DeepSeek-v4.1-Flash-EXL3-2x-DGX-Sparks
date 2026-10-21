@@ -66,6 +66,18 @@ remains an easy low-resource override. The head has about **5.9 GiB**
 end of a 601k prompt, while the new 1536 default has not yet been revalidated at
 that extreme length.
 
+**The live gb10 kit (2026-10-21)** differs from these defaults: `MAX_MODEL_LEN=393216`,
+a **4 GiB** pool (`KV_CACHE_MEMORY_BYTES=4294967296`), `LANGUAGE_MODEL_ONLY=1`.
+
+- A fresh boot leaves the head at 4.4–4.5 GiB `MemAvailable`. A long-running server sits
+  higher, about 5.2 GiB after 3 days.
+- With YOCO compact on, long cold prefills keep about 0.5 GiB more allocator cache. Back-to-back
+  256K/300K prefills dipped to **2.14 GiB** before start.sh's `empty_cache` release (below
+  `DSV41_PREFILL_EMPTY_CACHE_MEMAVAIL_GIB`, 2.5 GiB) brought it back to about 3 GiB. Raise that
+  threshold if you need more margin.
+
+Details: [docs/maintenance-window-20261021.md](docs/maintenance-window-20261021.md).
+
 `start.sh` enforces the rest: a boot-margin preflight, per-prefill allocator release, and a
 post-load page-cache drop. Engram tables are never pinned — the row store replaces vLLM's
 `cpu_offload`, which would `cudaHostAlloc` ~47 GiB per layer.
@@ -444,7 +456,7 @@ the base vocabulary. Ordinary prompts are encoded by the same call as before. **
 deployed on the live kit.** Finding, design, verification and deploy steps:
 [docs/control-token-injection-20261020.md](docs/control-token-injection-20261020.md).
 
-## Prefill truncation (YOCO) — prepared, off by default
+## Prefill truncation (YOCO) — live on the gb10 kit since 2026-10-21
 
 `DSV41_YOCO_PREFILL=compact` ports DeepInfer's decoder-SWA bounded replay. Prefill runs
 the 20 decoder layers (20-39) only on the last `DSV41_YOCO_KEEP_TOKENS` (140) positions.
@@ -456,12 +468,20 @@ The result is approximate, which DeepSeek accepts in production, and these come 
 - prefix-cache hits stop 204-331 tokens before the prompt end;
 - start.sh requires `LANGUAGE_MODEL_ONLY=1` and KEEP >= 128 + `DSPARK_TOKENS` + 1.
 
-Unset or `off` is today's launch: the vLLM argv is byte-identical and the patch does not run.
-It has not been deployed. The design, the prefix-cache and DSpark analysis, and the
-operator's maintenance-window plan are in
+Unset or `off` is the stock launch: the vLLM argv is byte-identical and the patch does not run.
+The gb10 kit runs `compact` since the 2026-10-21 maintenance window:
+
+- cold prefill is 1.66× faster at 45K (TTFT 43.8 → 26.3 s), 1.72× at 128K, and 1.86× at 380K
+  (433.5 → 232.9 s);
+- the teacher-forced logprob A/B passes, with top-1 unchanged at every probe;
+- the needle battery (8K–300K) is identical to the same-weights baseline;
+- the cost is about 0.5 GiB more allocator cache on the head under long prefills (see Memory).
+
+Results: [docs/maintenance-window-20261021.md](docs/maintenance-window-20261021.md). The design,
+the prefix-cache and DSpark analysis, and the validation plan are in
 [docs/yoco-prefill-truncation.md](docs/yoco-prefill-truncation.md).
 
-## Final sliding-window retention — prepared, off by default
+## Final sliding-window retention — live on the gb10 kit since 2026-10-21
 
 On an agent turn, the next prompt holds the previous turn's whole output. Today the prefix
 cache keeps the hybrid model's sliding-window state only at a prefill's end and every
@@ -477,9 +497,16 @@ the week to 10-21 that was 3.98 M of 4.86 M own-output tokens (repl PROGRESS 10-
   KEEP + 64 further back, serves short continuations.
 
 It is exact: hit selection, retention and the DSpark block drop are unchanged. The record
-predicts −78 % of the own-output re-prefill. Unset or `off` is today's launch: the vLLM
-argv is byte-identical and the patch does not run. It has not been deployed. The design,
-the deferred encoder bounded replay, and the operator's measurement plan are in
+predicts −78 % of the own-output re-prefill. Unset or `off` is the stock launch: the vLLM
+argv is byte-identical and the patch does not run. The gb10 kit runs `keep` since the
+2026-10-21 maintenance window.
+
+- A repeated 8,195-token prompt now hits 8,064 cached tokens (stock: 4,096).
+- The worst per-turn miss in the agent-prefix run fell from 1,924 to 154 tokens.
+- Decode speed and head memory are unchanged.
+
+Results: [docs/maintenance-window-20261021.md](docs/maintenance-window-20261021.md). The design,
+the deferred encoder bounded replay, and the measurement plan are in
 [docs/swa-final-window-retention.md](docs/swa-final-window-retention.md).
 
 ## CX7

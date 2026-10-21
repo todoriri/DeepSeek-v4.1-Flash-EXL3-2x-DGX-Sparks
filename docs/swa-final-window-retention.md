@@ -344,7 +344,17 @@ never hashed. Two mutants survived a first run and got scenarios of their own: i
 tokens counted, with a prefill chunk in flight and no placeholders; and a YOCO checkpoint past
 the computed tokens, on an abort mid-prefill.
 
-## 9. Maintenance-window measurement plan (operator only; not run)
+## 9. Maintenance-window measurement plan (run 2026-10-21: live)
+
+**Run 2026-10-21; `keep` is live on the gb10 kit, with YOCO compact.**
+
+- A repeated 8,195-token prompt hits 8,064 cached tokens (stock: 4,096).
+- The worst agent-prefix miss fell from 1,924 to 154 tokens.
+- Decode and head memory are unchanged: the A0→A1 `MemAvailable` offset is the fresh boot.
+- The first-cache log line raised a TypeError on every free, after caching. Fixed in `9063305`.
+- The organic-traffic comparison (step 1) is still to run after ≥ 60 min of real traffic.
+
+Full results: [maintenance-window-20261021.md](maintenance-window-20261021.md).
 
 The live launcher is the non-git kit `gb10:/mnt/storage1/dsv41/exl3-kit`.
 

@@ -307,7 +307,20 @@ EXL3 dequantisation, memory-bound small-M MoE, eager overheads, and the encoder'
 indexer will make the real gain smaller. A plausible guess is a 45K TTFT of about 30-35 s
 (from 57 s) and 380K at about 1.4-2k tok/s (from 909). The trial measures it.
 
-## 10. Maintenance-window validation plan (operator only; not run)
+## 10. Maintenance-window validation plan (run 2026-10-21: live)
+
+**Run 2026-10-21; `compact` is live on the gb10 kit.**
+
+- 1.66× / 1.72× / 1.86× cold prefill at 45K / 128K / 380K.
+- Logprob A/B PASS, top-1 unchanged everywhere.
+- Needle identical to the 10-18 same-weights run.
+- Retention 7,936 and 34,048, as predicted.
+- **The memory rule below was missed**: ~0.5 GiB more allocator cache on long prefills, lowest
+  2.14 GiB with the 2.5 GiB `empty_cache` release firing. The operator accepted it.
+- The kit's start.sh had **not** diverged (byte-identical to `949c96a`), so the repo copy was
+  dropped in.
+
+Full results: [maintenance-window-20261021.md](maintenance-window-20261021.md).
 
 0. **Deploy.**
    - On rai: run all `tests/test_yoco_*.py` and `bash -n start.sh`.
