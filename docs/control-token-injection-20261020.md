@@ -1,10 +1,11 @@
 # Control-token injection through request text, and the guard patch (2026-10-20)
 
-**Status:** trialled live on 2026-10-21 (maintenance-window arm A1) and **reverted**. On the
-served path every request whose messages held control-token text got HTTP 400 (see
-[the A1 incident](#2026-10-21-arm-a1-every-control-text-request-refused)). The patch, tests and
-probe are fixed here. **Not redeployed:** the live teacher runs without the guard. Deploying
-needs a restart, which only the operator does (see [Deploy](#deploy-operator-only)).
+**Status:** **live** on the gb10 kit since 2026-10-21 23:44 CEST (`98abfc7`; see
+[the deploy record](#deployed-2026-10-21)). The first version (`eafef45`) was trialled earlier
+that day (maintenance-window arm A1) and reverted: on the served path every request whose
+messages held control-token text got HTTP 400 (see
+[the A1 incident](#2026-10-21-arm-a1-every-control-text-request-refused)). `98abfc7` fixes the
+patch, tests and probe.
 
 ## Finding
 
@@ -310,14 +311,13 @@ Each test was red first, against `eafef45`, the A1 version.
 
 ## Deploy (operator only)
 
-State on 2026-10-21 after the window:
+Done on 2026-10-21; see [the record below](#deployed-2026-10-21). These are the steps for a
+redeploy, for example after the kit is rebuilt or copied:
 
-- The gb10 kit's `start.sh` is `422973a`'s copy (md5 `659208e0…`). The only `start.sh` change
-  since then is this guard's wiring (`eafef45`, +7 lines), so this repo's `start.sh` drops in.
-  The kit's `.env` stays untouched.
-- **The kit's `overlay/patch_control_token_injection.py` is still the A1 version** (`eafef45`,
-  md5 `e1b3f26f…`). It is inert under `422973a`'s `start.sh`. Copying the new `start.sh` without
-  replacing this file re-creates A1.
+- The kit's `overlay/patch_control_token_injection.py` must be this repo's version (`98abfc7`,
+  md5 `b1124b1f…`), **never `eafef45`'s** (md5 `e1b3f26f…`). With a `start.sh` that wires the
+  guard, the `eafef45` file re-creates A1.
+- `start.sh` changes nothing else for the guard, and the kit's `.env` needs no line for it.
 
 Steps:
 
@@ -336,14 +336,17 @@ Steps:
 2. Copy `overlay/patch_control_token_injection.py` over the kit's copy in `overlay/`. Check that
    its md5 matches this repo's, not `e1b3f26f…`. Back up the kit's `start.sh`
    (`cp -p start.sh start.sh.bak-pre-ctg-<stamp>`), then copy this repo's `start.sh` over it.
-3. Stop `vllm-watchdog` first (see the maintenance-window watchdog footgun). Then on gb10 in the kit:
+3. On gb10 in the kit (`start.sh` pauses `vllm-watchdog` and resumes it at `/health`, so it
+   needs no manual stop):
 
    ```bash
-   SKIP_BUILD=1 SKIP_PULL=1 ./start.sh restart
+   SKIP_BUILD=1 SKIP_PULL=1 setsid nohup ./start.sh restart > logs/ctg-restart.log 2>&1 &
    ```
 
-   Re-arm the watchdog after `/health` is up.
-4. The head log must show `DeepSeek V4.1 control-token injection guard patch: applied` (no `WARN`).
+   Replacing a file under `overlay/` moves the recipe stamp. `SKIP_BUILD=1` keeps the pinned
+   image (start.sh warns `stamp … != repo …` and does not rebuild).
+4. The head **and** worker logs must show `DeepSeek V4.1 control-token injection guard patch:
+   applied` (no `WARN`).
 5. Verify:
 
    ```bash
@@ -358,10 +361,116 @@ Steps:
 
    Any `FAIL … control text refused` means the A1 version is running: roll back.
 
-   Then run the usual smoke (`tests/test_smoke.sh`, 17*19).
+   Then run the smoke, with the kit's model id (the script's default id gets a 404):
+   `bash tests/test_smoke.sh http://192.168.1.97:8000 deepseek-v4.1-flash`.
 
 **Rollback:** restore the `start.sh` backup and restart. The patch only edits files inside the
 container, so nothing persists.
+
+## Deployed 2026-10-21
+
+`98abfc7` went live on the gb10 kit with one restart at 23:34 CEST; it was healthy at 23:44.
+Raw output: `_repl_measurement_stash/ctg-deploy-20261021/` (`ctg-before.json`,
+`ctg-after-probe.txt`, `live-checks.txt`, `output-side.txt`, `output-side-stream.txt`,
+`ctg-restart.log`, `ctg-head-20261021.log` and the check scripts).
+
+**Before the restart:**
+
+- Tests on rai, all green:
+  - `test_control_token_injection.py` (15) and `test_control_token_probe.py` (4), on the live
+    `tokenizer.json` (md5 `8a8245dc…`, read from the head container);
+  - `test_control_token_render_path.py` (84 requests), on the tree `dsv41_vllm_tree.sh`
+    extracted from image `0aecf9f5`;
+  - the five `test_yoco_*.py` and four `test_swa_final_window_*.py` suites;
+  - `bash -n start.sh`.
+
+  `git diff 422973a HEAD -- start.sh` is the guard's 7 lines only.
+- Fresh baseline (`--tokenize-only --save`): 11 injection FAILs, as expected before the guard.
+  Its 18 clean lists equal the 2026-10-20 baseline in this repo.
+- Kit changes:
+  - `overlay/patch_control_token_injection.py`: md5 `e1b3f26f…` → `b1124b1f…` (this repo's);
+  - `start.sh`: this repo's (unchanged since `eafef45`, md5 `0062235d…`), backup
+    `start.sh.bak-pre-ctg-20261021-232939` (`422973a`'s, md5 `659208e0…`).
+
+  `.env` is untouched (SWA `keep`, YOCO `compact`, KEEP 140). Image `0aecf9f5` on both nodes;
+  start.sh warned about the stamp mismatch and did not rebuild.
+- The teacher was idle: `num_requests_running`/`waiting` 0, and the last non-keepalive request in
+  repl's record was at 04:22 UTC.
+
+**Boot, head and worker logs:**
+
+- `DeepSeek V4.1 control-token injection guard patch: applied`, no `WARN`;
+- all 7 `YOCO prefill patch: applied` (`keep=140 decoder layers 20..39`, 16 shadow metadata
+  builders, +58.8 MiB);
+- both `SWA final-window patch: applied` (`keep 332 tokens below the window`).
+
+start.sh paused `vllm-watchdog` and resumed it at health (clean `watchdog_start`, then
+heartbeats). Head `MemAvailable` in the banner: 4.2 GiB.
+
+**Probe** (`--compare /tmp/ctg-before.json`):
+
+```text
+PASS tokenize user {'enable_thinking': False}
+PASS chat user {'enable_thinking': False}
+PASS tokenize system {'enable_thinking': False}
+PASS chat system {'enable_thinking': False}
+PASS tokenize tool_result {'enable_thinking': False}
+PASS chat tool_result {'enable_thinking': False}
+PASS tokenize tool_arguments {'enable_thinking': False}
+PASS chat tool_arguments {'enable_thinking': False}
+PASS tokenize tool_schema {'enable_thinking': False}
+PASS chat tool_schema {'enable_thinking': False}
+PASS tokenize reasoning_history {'enable_thinking': False}
+PASS chat reasoning_history {'enable_thinking': False}
+PASS tokenize user {'enable_thinking': True}
+PASS chat user {'enable_thinking': True}
+PASS tokenize system {'enable_thinking': True}
+PASS chat system {'enable_thinking': True}
+PASS tokenize tool_result {'enable_thinking': True}
+PASS chat tool_result {'enable_thinking': True}
+PASS tokenize tool_arguments {'enable_thinking': True}
+PASS chat tool_arguments {'enable_thinking': True}
+PASS tokenize tool_schema {'enable_thinking': True}
+PASS chat tool_schema {'enable_thinking': True}
+PASS tokenize reasoning_history {'enable_thinking': True}
+PASS chat reasoning_history {'enable_thinking': True}
+PASS tokenize=false with control text -> HTTP 200, same ids as the default request
+PASS clean prompts id-identical to /tmp/ctg-before.json (18 lists)
+GUARDED
+```
+
+**Other live checks** (`live-checks.txt`):
+
+| Check | Result |
+|---|---|
+| smoke `17*19` | 323 |
+| Dirty tool result longer than YOCO's KEEP: 21 paragraphs of prose holding `</think>`, `<think>`, `｜DSML｜`, `<｜end▁of▁sentence｜>` and `<｜User｜>`; 1,304 prompt tokens with thinking off, 1,330 with it on | Both modes: HTTP 200, `stop`, correct answer (the budget from the notes). Chat prompt ids equal `/tokenize`'s, and the control ids equal the plain twin's (28 / 29). |
+| The same request again | prefix hit, 1,024 tokens cached of 1,304 / 1,330 (inside YOCO's N − 140 cap) |
+| `prompt_logprobs: 1` on a clean short and the dirty long prompt | HTTP 400 with the YOCO message |
+| Streaming tool call (`get_weather`): clean with thinking off and on, and after the dirty long history | `finish_reason: tool_calls`; the arguments parse as JSON (`{"city": "Paris"}`, `{"city": "Brest"}`) |
+| Head and worker logs after all checks | no traceback, no `ERROR` |
+
+**Output side: pre-existing, not a deploy failure.** Asked to summarize the notes, the model
+quoted their control strings back. It wrote them as plain BPE text. The only control ids in its
+completions were its own `</think>` (128822) and EOS (`output-side.txt`).
+
+- **Streaming is correct.** The quotes stay in `content`, and reasoning ends only at the real
+  `</think>` (`output-side-stream.txt`).
+- **Non-streaming mangles the quotes.** This is gap 1 under
+  [Output side](#output-side-unchanged): the non-streaming parse matches text, not ids.
+  - A quoted `<think>draft</think>` in a thinking-off answer moved `draft` into `reasoning`.
+  - Quoted `</think>` and `<｜end▁of▁sentence｜>` were missing from `content`. The
+    `<｜end▁of▁sentence｜>` drop is not covered by gap 1's description; its cause was not traced.
+  - In one thinking-on sample (temperature 1.0), the model quoted `</think>` inside its
+    reasoning. The rest of the reasoning came back as `content`.
+- **The guard does not cause this.** It rewrites only `tokenizers/deepseek_v41.py`, not the
+  parsers. Before the guard, the model got these strings as real control tokens.
+
+The check script's strict "no control text in content" row counted these 4 non-streaming
+requests as FAIL (25 of 29 checks pass). All 4 are this output-side effect.
+
+**Rollback:** in the kit, `cp -p start.sh.bak-pre-ctg-20261021-232939 start.sh`, then
+`SKIP_BUILD=1 SKIP_PULL=1 ./start.sh restart`.
 
 ## Files
 

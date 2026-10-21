@@ -454,17 +454,20 @@ real control tokens. This was confirmed live on 2026-10-20 on every surface.
 the positions the encoder inserted them. Text holding added-token strings is encoded with
 the base vocabulary. Ordinary prompts give the same ids as before.
 
-**Trialled live on 2026-10-21 (maintenance arm A1) and reverted.** The first version
-refused `tokenize=false` with control text (HTTP 400), to close what looked like a bypass.
-But the server itself always calls the template with `tokenize=False`: in
-`OnlineRenderer.preprocess_chat`, the renderer encodes the returned string. So every chat,
-`/tokenize` and Responses request holding control text got HTTP 400. An agent session with
-such a tool result in its history failed on every later turn. Clean prompts were
-id-identical.
+**Live on the gb10 kit since 2026-10-21 (`98abfc7`).** The first version (`eafef45`) was
+trialled earlier that day (maintenance arm A1) and reverted. It refused `tokenize=false`
+with control text (HTTP 400), to close what looked like a bypass. But the server itself
+always calls the template with `tokenize=False`: in `OnlineRenderer.preprocess_chat`, the
+renderer encodes the returned string. So every chat, `/tokenize` and Responses request
+holding control text got HTTP 400. An agent session with such a tool result in its history
+failed on every later turn. Clean prompts were id-identical.
 
 The fix returns the guarded token ids on that path, and clean prompts still return the same
-string. A new test runs the image's real serving code on CPU. **Not redeployed:** the live
-kit runs without the guard. Finding, A1 incident, design, verification and deploy steps:
+string. A new test runs the image's real serving code on CPU. After the deploy, the live
+probe reports `GUARDED` on `/tokenize` and chat, and clean prompts keep their ids. The output
+side is unchanged: a non-streaming response still matches `<think>`/`</think>` by text, so an
+answer that quotes those strings comes back mangled. Streaming keeps the quotes. Finding, A1
+incident, design, verification and the deploy record:
 [docs/control-token-injection-20261020.md](docs/control-token-injection-20261020.md).
 
 ## Prefill truncation (YOCO) — live on the gb10 kit since 2026-10-21

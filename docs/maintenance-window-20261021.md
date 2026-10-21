@@ -12,7 +12,7 @@ Raw data, the driver script and every log: `_repl_measurement_stash/maint-202610
 |---|---|---|---|
 | Final sliding-window retention (`DSV41_SWA_FINAL_WINDOW=keep`) | `422973a`, log fix `9063305` | **on** | pass |
 | YOCO prefill truncation (`DSV41_YOCO_PREFILL=compact`, KEEP 140) | `292d4e2` | **on** | pass, memory margin accepted by the operator |
-| Control-token injection guard | `eafef45` | **off** (reverted) | fail: HTTP 400 on the served chat path |
+| Control-token injection guard | `eafef45`, fix `98abfc7` | **on** since 2026-10-21 23:44 CEST (`98abfc7`) | `eafef45` failed in the window (HTTP 400 on the served chat path) and was reverted; `98abfc7` deployed after the window, probe `GUARDED` ([record](control-token-injection-20261020.md#deployed-2026-10-21)) |
 
 Kit state after the window:
 - `start.sh` = this repo's `422973a` version: YOCO and SWA hunks, no control-token hunks. The
@@ -23,6 +23,11 @@ Kit state after the window:
   Backup: `.env.bak-pre-maint-20261021`.
 - `overlay/` gained `patch_swa_final_window.py` (the `9063305` version), `patch_yoco_prefill.py`
   and `dsv41_yoco.py`. `patch_control_token_injection.py` is present but not referenced.
+- **Later on 2026-10-21 (after the window):** the guard was deployed with one more restart.
+  `overlay/patch_control_token_injection.py` is now the `98abfc7` version, and `start.sh` is this
+  repo's (unchanged since `eafef45`: `422973a` plus the guard's 7 lines). Backup:
+  `start.sh.bak-pre-ctg-20261021-232939`. `.env` was not changed. Record:
+  [control-token-injection-20261020.md](control-token-injection-20261020.md#deployed-2026-10-21).
 
 Rollback: delete either `.env` line (or set it to `off`) and run
 `SKIP_BUILD=1 SKIP_PULL=1 ./start.sh restart`. For the full pre-window state, restore both backups.
@@ -186,4 +191,5 @@ ever needs more margin, the lever is that threshold (e.g. 3.0 GiB), at some pref
 - **Long-context DSpark acceptance.** Compare the repl record's decode tok/s for prompts > 32K
   before and after the window.
 - **Head memory.** Watch the `dsv41-mem` release lines and `MemAvailable` on long sessions.
-- **Control-token guard:** re-deploy only after the served-path fix is tested.
+- **Control-token guard:** done. The served-path fix (`98abfc7`) was tested and deployed on
+  2026-10-21 at 23:44 CEST (see the record linked above).
