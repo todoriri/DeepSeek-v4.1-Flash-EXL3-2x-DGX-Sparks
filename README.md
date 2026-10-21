@@ -621,6 +621,9 @@ ideal `/tokenize` prefix across agent-shaped sessions. Results from 2026-09-23:
 against the head; DeepInfer's reference Pass@1 for V4.1 is AIME 2026 99.9% and GPQA Diamond
 93.4% (full protocol, effort 100). It waits for an idle teacher and stops at a token/time budget;
 dataset prep, budgets and wall-clock: [docs/deepinfer-bench-protocol.md](docs/deepinfer-bench-protocol.md).
+On 2026-10-21 the live kit (YOCO compact + SWA keep) scored **30/30 on AIME 2026** at effort 100,
+with one sample per item. That puts per-item accuracy at ≥ 90.5 % (exact 95 % bound): consistent
+with the 99.9 % reference, and no large quantization loss (protocol doc §8).
 Its offline test needs no API: `python3 tests/test_deepinfer_bench.py`.
 
 The image build runs thirteen in-image tests (EXL3 overlay with

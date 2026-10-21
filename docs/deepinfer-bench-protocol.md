@@ -276,3 +276,30 @@ The run used the default gate and yield settings. Budgets were 60K tokens / 2 h 
   - keepalive filtering.
 
 The suite killed 22 of 22 hand-made mutants.
+
+## 8. AIME 2026, 30 × 1 at effort 100, on the live kit (2026-10-21)
+
+Run 19:29–22:44 CEST on the post-window config: 10-18 weights, SWA `keep`, YOCO `compact`
+([maintenance-window-20261021.md](maintenance-window-20261021.md)). Effort 100, all 30 items,
+1 sample each, rule judge. Data: `_repl_measurement_stash/deepinfer-bench-aime-max-20261021/`.
+
+**Result: 30/30 (Pass@1 100 %).**
+
+- Every rollout ended `stop`, with none truncated, none flagged and no yields; all 30 answers came
+  from `\boxed{}`.
+- Completion tokens: mean 14,034, median 9,136, p90 33,994, max 86,850; 421,015 in total.
+- Decode median 40.0 tok/s; 194 min of generation. §5 estimated 2–6 h.
+
+How to read it:
+- With one sample per item, 30/30 bounds the per-item accuracy at **≥ 90.5 %** (exact one-sided
+  95 %; two-sided 88.4 %). The summary's item-bootstrap CI (100–100) is degenerate at 30/30;
+  use the exact bound.
+- So it agrees with DeepInfer's 99.9 % and rules out a large loss from the 2.9 bpw EXL3
+  quantization. It cannot tell 99.9 % from about 95 %; that would take the full 32-sample
+  protocol (days, §5).
+- It is a light YOCO check only: prompts were 80–395 tokens, and 19 of 30 exceeded KEEP (140), so
+  the truncation skipped at most 255 positions. The long-context YOCO checks are the window's
+  logprob A/B and needle battery.
+
+Next, if an effort A/B is wanted: rerun with `--efforts high,max`. The max arm is reused (resume),
+and only the 30 `high` rollouts are new.
