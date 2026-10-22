@@ -215,8 +215,13 @@ ever needs more margin, the lever is that threshold (e.g. 3.0 GiB), at some pref
     YOCO's cap on short (~370-token) outputs, and the small sample.
   - Re-run on a busier window, with `--per-turn`, before drawing a verdict.
   - Raw data: `_repl_measurement_stash/ots-deploy-20261022/swa-turns-*.txt`.
-- **Long-context DSpark acceptance.** Compare the repl record's decode tok/s for prompts > 32K
-  before and after the window.
+- **Long-context DSpark acceptance — closed 2026-10-22: no change.** Split by client and prompt
+  length (`swa_final_window_turns.py`, `decode_tok_s_by`), the one client present on both sides
+  decodes the same: Hermes at 32–128K, 40.8 tok/s from the 10-18 weights swap to the window
+  (n = 177) against 41.25 after it (n = 84). The gap below is client mix: dsh (`coding`)
+  decodes at 47.5 (32–128K) and 49.2 (≥ 128K) and sent no traffic after the window. The
+  original note:
+- Compare the repl record's decode tok/s for prompts > 32K before and after the window.
   - Same tool, all rows: the median is 42.0 tok/s after the window (n = 92) against 51.5
     before (n = 7,449).
   - That is not like for like: the post-window sample is small and its prompt-length mix is
@@ -239,7 +244,6 @@ The repl index is `docs/PROGRESS.md` 2026-10-22 (repl `d0d0823`).
   - pushed to `origin/main`.
 - **Open:**
   - the organic own-output reuse verdict for dsh (above; the Hermes part is explained);
-  - the > 32K decode split (above);
   - head memory.
 - **Prepared for the next window (one file, one restart):** the streaming DSML fix and the
   non-streaming reasoning-token count

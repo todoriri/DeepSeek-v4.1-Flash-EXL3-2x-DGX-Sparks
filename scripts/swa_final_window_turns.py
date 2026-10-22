@@ -34,7 +34,10 @@ n+1's prompt and H = its cached tokens:
                              a 4096 checkpoint can sit above B_yoco.
                   The predicted value is max(observed, that). It does not model eviction.
 
-Totals are also split by client (agent_mode; dsh sends "coding").  Also printed per window: decode tok/s (output / (total - ttft), rows with >= 64 output
+Totals are also split by client (agent_mode; dsh sends "coding").  Also printed per window: decode tok/s
+(overall, and per client and prompt-length bucket: compare windows only within one cell, since
+DSpark acceptance depends on the client's content; 2026-10-22: Hermes 32-128K 40.8 before the
+10-21 window vs 41.3 after, dsh 47.5) (output / (total - ttft), rows with >= 64 output
 tokens and >= 1 s of decode) and prefill tok/s ((prompt - cached) / ttft, rows with >= 2048 uncached tokens).
 Use them to check that decode is unchanged. The record holds no memory figure: head
 MemAvailable comes from the head log / free -m (docs/swa-final-window-retention.md).
@@ -162,6 +165,15 @@ def _dist(values: list[int]) -> dict[str, Any] | None:
             "max": max(values)}
 
 
+def decode_rate(row: dict[str, Any]) -> float:
+    return int(row["output_tokens"]) / ((int(row["total_ms"]) - int(row["ttft_ms"])) / 1000)
+
+
+def prompt_bucket(prompt_tokens: int) -> str:
+    """Decode rate depends on context length and on the client's content (DSpark acceptance)."""
+    return "a <32K" if prompt_tokens < 32768 else "b 32-128K" if prompt_tokens < 131072 else "c >=128K"
+
+
 def _totals(full: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "turns": len(full),
@@ -180,11 +192,15 @@ def summarize(rows: list[dict[str, Any]], path: str, keep: int) -> dict[str, Any
     dropped = [t for t in full if t["history"] == "dropped"]
     by_history["dropped"]["own_output_in_next_prompt"] = sum(
         max(0, t["output"] - int(t["reasoning"])) for t in dropped)
-    decode = [int(r["output_tokens"]) / ((int(r["total_ms"]) - int(r["ttft_ms"])) / 1000)
-              for r in rows if int(r.get("output_tokens") or 0) >= 64
-              and int(r.get("total_ms") or 0) - int(r.get("ttft_ms") or 0) >= 1000
-              and int(r.get("ttft_ms") or 0) > 0
-              and str(r.get("call_origin") or "") not in INTERNAL_ORIGINS]
+    decoded = [r for r in rows if int(r.get("output_tokens") or 0) >= 64
+               and int(r.get("total_ms") or 0) - int(r.get("ttft_ms") or 0) >= 1000
+               and int(r.get("ttft_ms") or 0) > 0
+               and str(r.get("call_origin") or "") not in INTERNAL_ORIGINS]
+    decode = [decode_rate(r) for r in decoded]
+    decode_by: dict[str, dict[str, list[float]]] = {}
+    for r in decoded:
+        decode_by.setdefault(r.get("agent_mode") or "-", {}).setdefault(
+            prompt_bucket(int(r.get("prompt_tokens") or 0)), []).append(decode_rate(r))
     prefill = []
     for r in rows:
         c = cached_known(r)
@@ -209,6 +225,9 @@ def summarize(rows: list[dict[str, Any]], path: str, keep: int) -> dict[str, Any
         "by_agent_mode": {mode or "-": _totals([t for t in full if t["agent_mode"] == mode])
                           for mode in sorted({t["agent_mode"] for t in full})},
         "decode_tok_s": _dist([round(x, 1) for x in decode]),
+        "decode_tok_s_by": {mode: {bucket: _dist([round(x, 1) for x in rates])
+                                   for bucket, rates in sorted(buckets.items())}
+                            for mode, buckets in sorted(decode_by.items())},
         "prefill_tok_s": _dist([round(x, 1) for x in prefill]),
         "keep": keep,
         "turns": ts,
@@ -313,7 +332,7 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(s, indent=1))
         return 0
     for k, v in s.items():
-        if k in ("by_history", "by_agent_mode"):
+        if k in ("by_history", "by_agent_mode", "decode_tok_s_by"):
             for name, totals in v.items():
                 print(f"{k + '.' + name:32} {totals}")
         elif k != "turns":

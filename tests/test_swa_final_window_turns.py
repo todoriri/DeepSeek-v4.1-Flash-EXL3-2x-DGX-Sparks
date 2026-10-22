@@ -9,7 +9,8 @@
   * decode / prefill rates; the DB is opened read-only; a missing DB exits 2;
   * history (2026-10-22): a turn whose next request drops the previous output's reasoning
     (repl request_bodies) is "dropped", not reusable; "echoed" / "no_reasoning" are; no
-    body, an unreadable one or no assistant message is "unknown"; totals per agent_mode.
+    body, an unreadable one or no assistant message is "unknown"; totals per agent_mode;
+    decode tok/s per agent_mode and prompt-length bucket.
 """
 from __future__ import annotations
 
@@ -175,6 +176,17 @@ def test_history_classes():
     assert {k: v["turns"] for k, v in plain["by_history"].items()} == {
         "no_reasoning": 1, "echoed": 0, "dropped": 0, "unknown": 7}
     assert W.history({"reasoning_tokens": None}, {"history_reasoning": True}) == "unknown"
+
+
+def test_decode_split_by_client_and_prompt_length():
+    rows = [_row(i, prompt_tokens=P, output_tokens=400, ttft_ms=1000, total_ms=1000 + ms, agent_mode=mode)
+            for i, (P, ms, mode) in enumerate([(1000, 8000, ""), (40000, 10000, ""), (50000, 8000, "coding"),
+                                               (200000, 8000, "coding"), (60000, 500, "")])]  # last: < 1 s decode
+    by = W.summarize(rows, "/v1/chat/completions", 140)["decode_tok_s_by"]
+    assert by == {"-": {"a <32K": W._dist([50.0]), "b 32-128K": W._dist([40.0])},
+                  "coding": {"b 32-128K": W._dist([50.0]), "c >=128K": W._dist([50.0])}}, by
+    assert W.prompt_bucket(32767) == "a <32K" and W.prompt_bucket(32768) == "b 32-128K"
+    assert W.prompt_bucket(131072) == "c >=128K"
 
 
 def test_missing_db_and_args():
