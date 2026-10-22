@@ -221,7 +221,7 @@ Pre-existing output-side gaps the patch does **not** change (noted, not fixed):
 
 Both are traced, and fixed for non-streaming, in
 [output-token-split-20261022.md](output-token-split-20261022.md)
-(`overlay/patch_output_token_split.py`, prepared, not deployed). The same trace explains the
+(`overlay/patch_output_token_split.py`, live since 2026-10-22). The same trace explains the
 quoted `<｜end▁of▁sentence｜>` drop below: the engine drops BOS/EOS **by text** when it has no
 ids (`_build_drop_info`). Gap 2 stays open in streaming.
 

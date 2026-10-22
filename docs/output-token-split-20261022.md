@@ -1,8 +1,8 @@
 # Non-streaming output parsing by token id (2026-10-22)
 
-**Status:** prepared, **not deployed**. `overlay/patch_output_token_split.py` (runtime, both
-ranks, wired in `start.sh`), `tests/test_output_token_split.py`. Deploying it needs one restart,
-on the operator's go; see [Deploy](#deploy-operator-only).
+**Status:** **live on the gb10 kit since 2026-10-22 15:38 CEST** (one restart; record in
+[Deploy record](#deploy-record-2026-10-22)). `overlay/patch_output_token_split.py` (runtime, both
+ranks, wired in `start.sh`), `tests/test_output_token_split.py`.
 
 ## The problem
 
@@ -240,7 +240,7 @@ Without the tree it checks only the `start.sh` wiring and prints a skip line.
 
 ## Deploy (operator only)
 
-Not done. One restart. The patch only edits a file inside the container at start, so nothing
+Done on 2026-10-22 (record below). One restart. The patch only edits a file inside the container at start, so nothing
 persists across a rollback.
 
 1. **Before the window, on rai:**
@@ -287,3 +287,41 @@ persists across a rollback.
 
 **Rollback:** `cp -p start.sh.bak-pre-ots-<stamp> start.sh`, then
 `SKIP_BUILD=1 SKIP_PULL=1 ./start.sh restart`.
+
+## Deploy record (2026-10-22)
+
+One restart, `SKIP_BUILD=1 SKIP_PULL=1 ./start.sh restart`, launched 15:28:28 CEST, `/health` 200
+at 15:38:43. The engine was idle: 0 running and 0 waiting, and repl's last client request was
+about 9.6 h earlier. Raw data: `_repl_measurement_stash/ots-deploy-20261022/`.
+
+- **Before the restart, on rai:**
+  - `test_output_token_split.py`, plus the guard suites `test_control_token_injection.py` (15),
+    `test_control_token_probe.py` (4) and `test_control_token_render_path.py` (84): all green, on
+    the live tokenizer.json (md5 `8a8245dc…`, equal to the kit's model copy);
+  - `bash -n start.sh` OK;
+  - `git diff c35177c -- start.sh` = the patch's 7 lines.
+- **Kit changes:**
+  - `overlay/patch_output_token_split.py` added (md5 `95333605…`);
+  - `start.sh` `0062235d` → `85a22ced` (backup `start.sh.bak-pre-ots-20261022-152816`);
+  - the guard file is still `b1124b1f…`, and `.env` is untouched (SWA keep, YOCO compact).
+- **Logs:** head and worker both show `output token split patch: applied` and the guard `applied`,
+  with no WARN, and the SWA/YOCO lines are unchanged.
+- **Verify:**
+  - `tests/test_smoke.sh` → 323, both with the id given and with it read from `/v1/models`.
+  - **`ctg_output_side.py` (non-streaming):**
+    - Thinking on: the raw output holds the real `</think>` (id 128822) and two quoted ones. The
+      reasoning keeps one quote and ends at the real token; the content keeps the other quote and
+      a quoted `｜DSML｜`.
+    - Thinking off: `reasoning` is null. This sample quoted no control text, so it does not test
+      the masking.
+  - `ctg_stream_split.py` is unchanged (finish `stop`, 0 tool-call deltas, both modes).
+  - `dsml_ids.py`: `get_weather {"city": "Paris"}`, `finish_reason: tool_calls`, both modes.
+  - **`ctg_live_checks.py`:** 27 PASS / 2 FAIL, against 25 / 4 before the deploy.
+    - The two FAILs are thinking-off cold and repeat on that script's "no control text in content"
+      check: the model quoted the notes' markers in its summary, and the content now keeps those
+      quotes by design.
+    - No tool call was produced (`tool_calls=None`).
+    - Prompt ids still equal `/tokenize`, and the YOCO prefix hit stays inside N-140.
+  - The head log has 0 `output token split:` fallback lines and 0 tracebacks.
+- **Rollback (unused):** `cp -p start.sh.bak-pre-ots-20261022-152816 start.sh`, then
+  `SKIP_BUILD=1 SKIP_PULL=1 ./start.sh restart`.

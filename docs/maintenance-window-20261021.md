@@ -184,32 +184,45 @@ ever needs more margin, the lever is that threshold (e.g. 3.0 GiB), at some pref
 
 ## Follow-ups
 
-- **Organic own-output reuse.** After at least 60 min of real agent traffic, run
-  `python3 scripts/swa_final_window_turns.py --from <final restart> --json` and compare
-  re-prefilled own output per turn with the pre-window week. The prediction is −78 % with YOCO
-  off; under YOCO the cap moves the hit back by up to 395 tokens.
+- **Organic own-output reuse — measured 2026-10-22: NOT the predicted saving (open).**
+  `scripts/swa_final_window_turns.py`, read-only on repl's record:
+  - From the final restart (10-21 21:44Z) to the 10-22 restart: 95 continuations, 55 of which
+    hold the whole previous output. 19,314 of 20,355 own-output tokens were re-prefilled (95 %).
+    The length-only prediction under keep + compact is 6,188.
+  - In the pre-window week (10-14 to 10-21 10:00Z): 4,009,469 of 4,881,676 were re-prefilled
+    (82 %), with a prediction under keep + compact of 1,117,232.
+  - The hit still lands at the prompt tail in 32 of 55 (median −266 from the previous end).
+  - The head log shows the patch applied and caching final windows, so the retention runs. What
+    is not established is why organic turns miss it. Candidates: eviction across idle gaps,
+    YOCO's cap on short (~370-token) outputs, and the small sample.
+  - Re-run on a busier window, with `--per-turn`, before drawing a verdict.
+  - Raw data: `_repl_measurement_stash/ots-deploy-20261022/swa-turns-*.txt`.
 - **Long-context DSpark acceptance.** Compare the repl record's decode tok/s for prompts > 32K
   before and after the window.
+  - Same tool, all rows: the median is 42.0 tok/s after the window (n = 92) against 51.5
+    before (n = 7,449).
+  - That is not like for like: the post-window sample is small and its prompt-length mix is
+    unchecked. Split it by prompt length before reading anything into it.
 - **Head memory.** Watch the `dsv41-mem` release lines and `MemAvailable` on long sessions.
 - **Control-token guard:** done. The served-path fix (`98abfc7`) was tested and deployed on
   2026-10-21 at 23:44 CEST (see the record linked above).
 
-### Pending in this repo (cross-repo sweep, 2026-10-22)
+### Pending in this repo (cross-repo sweep, 2026-10-22; updated the same day)
 
 The repl index is `docs/PROGRESS.md` 2026-10-22 (repl `d0d0823`).
 
-- **The next window: the non-streaming output-token split.** `d68569a` is not deployed. It is
-  operator only: one restart in an idle window, following
-  [output-token-split-20261022.md](output-token-split-20261022.md) §Deploy.
-- **Push:** `e88c14d`, `c35177c`, `d68569a` (and this commit) are ahead of `origin/main`.
-- **Uncommitted since 2026-10-09:** the upstream #23 display-reserve-KV review. Its doc,
-  `docs/display-reserve-kv-issue23-20260918.md`, is untracked, and its README section is unstaged.
-  Commit both or drop both. The live numbers it quotes still match (1,223,846 tokens, 3.11×).
-- **Untracked since 2026-09-21:** `exl3-moe-wedge.*` at the repo root (an html page, its
-  architecture json, a visual-check html + json, 4 png). Move them under `docs/`, ignore them, or
-  delete them.
-- **`tests/test_smoke.sh`** defaults its model id to `DeepSeek-v4.1-Flash-EXL3` (incident 3 above).
-  Default it to the served `deepseek-v4.1-flash`.
+- **Done 2026-10-22:**
+  - the output-token split is live (one restart, 15:28–15:38 CEST;
+    [output-token-split-20261022.md](output-token-split-20261022.md) §Deploy record);
+  - the #23 review committed (`6c0e02a`);
+  - the 09-21 wedge diagram moved under `docs/exl3-moe-wedge-diagram-20260921/` and marked
+    superseded (`f9392f5`);
+  - `tests/test_smoke.sh` reads the served id from `/v1/models` when none is given;
+  - pushed to `origin/main`.
+- **Open:**
+  - the organic own-output reuse shortfall (above);
+  - the > 32K decode split (above);
+  - head memory.
 - **Open, documented gaps:**
   - streaming still matches DSML by text;
   - non-streaming `count_reasoning_tokens` shares the `rfind` anchor issue

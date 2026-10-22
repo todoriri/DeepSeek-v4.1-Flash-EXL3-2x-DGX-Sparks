@@ -478,7 +478,7 @@ also drops BOS/EOS by text, which is why a quoted `<｜end▁of▁sentence｜>` 
 `<｜DSML｜ calls>` block even comes back as a tool call. `overlay/patch_output_token_split.py`
 masks the strings that the ids show the model spelled with ordinary tokens, runs the image's
 parse unchanged, and restores them. It is tested on the image's real chat serving code and is
-**not deployed**. Streaming still matches DSML markers by text.
+**live on the gb10 kit since 2026-10-22**. Streaming still matches DSML markers by text.
 
 ## Upstream display-reserve KV (issue #23) — reviewed, not adopted
 
