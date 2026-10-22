@@ -480,6 +480,27 @@ masks the strings that the ids show the model spelled with ordinary tokens, runs
 parse unchanged, and restores them. It is tested on the image's real chat serving code and is
 **not deployed**. Streaming still matches DSML markers by text.
 
+## Upstream display-reserve KV (issue #23) — reviewed, not adopted
+
+Upstream [MiaAI-Lab#23](https://github.com/MiaAI-Lab/DeepSeek-v4.1-Flash-EXL3-2x-DGX-Sparks/issues/23)
+(`coolbho3k`) proposes carving **1.75 GiB of GB10 display reservation** per rank into the KV pool,
+with DCP2 + FP4 KV, for **3.1M** aggregate tokens. It is **not implemented on this kit**: the live
+serve args carry a 4 GiB ordinary-RAM pin (`KV_CACHE_MEMORY_BYTES`, which bypasses
+`GPU_MEM_UTIL`), the image picks `fp8_ds_mla`, and there is no DRM dumb-buffer allocator, FP4 KV or
+DCP2 anywhere in the container or this tree. Measured live pool: **1,223,846 tokens / 3.11× at 393K**.
+
+Worth knowing about the 3M claim: the 2 GB region is **not freed RAM** — it is a firmware scanout
+reservation the allocator registers for CUDA via `cuMemHostRegister(... IOMEMORY)` after a DRM dumb
+buffer. 1.75 GiB at our measured ~3.5 KiB/token buys only **~535k tokens**; the rest of 3.15M comes
+from FP4 main KV + FP8 sliding-window KV + DCP2. It is aggregate input across six sessions at a
+1,048,576 per-request limit, un-revalidated on the current upstream runtime. Adopting it also means
+running the coolbo fork (its patcher SHA-pins two installed vLLM files) and booting both Sparks
+headless (`multi-user.target`, `nvidia_drm fbdev=0`) — gb10 currently runs `graphical.target` with
+`fbdev=1`.
+
+Full review, config diff, and verification commands:
+[docs/display-reserve-kv-issue23-20260918.md](docs/display-reserve-kv-issue23-20260918.md).
+
 ## Prefill truncation (YOCO) — live on the gb10 kit since 2026-10-21
 
 `DSV41_YOCO_PREFILL=compact` ports DeepInfer's decoder-SWA bounded replay. Prefill runs
