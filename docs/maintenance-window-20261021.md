@@ -193,3 +193,26 @@ ever needs more margin, the lever is that threshold (e.g. 3.0 GiB), at some pref
 - **Head memory.** Watch the `dsv41-mem` release lines and `MemAvailable` on long sessions.
 - **Control-token guard:** done. The served-path fix (`98abfc7`) was tested and deployed on
   2026-10-21 at 23:44 CEST (see the record linked above).
+
+### Pending in this repo (cross-repo sweep, 2026-10-22)
+
+The repl index is `docs/PROGRESS.md` 2026-10-22 (repl `d0d0823`).
+
+- **The next window: the non-streaming output-token split.** `d68569a` is not deployed. It is
+  operator only: one restart in an idle window, following
+  [output-token-split-20261022.md](output-token-split-20261022.md) §Deploy.
+- **Push:** `e88c14d`, `c35177c`, `d68569a` (and this commit) are ahead of `origin/main`.
+- **Uncommitted since 2026-10-09:** the upstream #23 display-reserve-KV review. Its doc,
+  `docs/display-reserve-kv-issue23-20260918.md`, is untracked, and its README section is unstaged.
+  Commit both or drop both. The live numbers it quotes still match (1,223,846 tokens, 3.11×).
+- **Untracked since 2026-09-21:** `exl3-moe-wedge.*` at the repo root (an html page, its
+  architecture json, a visual-check html + json, 4 png). Move them under `docs/`, ignore them, or
+  delete them.
+- **`tests/test_smoke.sh`** defaults its model id to `DeepSeek-v4.1-Flash-EXL3` (incident 3 above).
+  Default it to the served `deepseek-v4.1-flash`.
+- **Open, documented gaps:**
+  - streaming still matches DSML by text;
+  - non-streaming `count_reasoning_tokens` shares the `rfind` anchor issue
+    ([output-token-split-20261022.md](output-token-split-20261022.md) §Not fixed).
+- **Optional:** the AIME 32-sample protocol, to separate 99.9 % from ~95 %
+  ([deepinfer-bench-protocol.md](deepinfer-bench-protocol.md) §8).
