@@ -1,8 +1,15 @@
 # Non-streaming output parsing by token id (2026-10-22)
 
-**Status:** **live on the gb10 kit since 2026-10-22 15:38 CEST** (one restart; record in
-[Deploy record](#deploy-record-2026-10-22)). `overlay/patch_output_token_split.py` (runtime, both
-ranks, wired in `start.sh`), `tests/test_output_token_split.py`.
+**Status:**
+
+- **Non-streaming:** **live on the gb10 kit since 2026-10-22 15:38 CEST** (one restart; record in
+  [Deploy record](#deploy-record-2026-10-22)).
+- **Streaming DSML + the non-streaming reasoning-token count:** prepared 2026-10-22, **not
+  deployed** ([Streaming](#streaming-and-the-reasoning-token-count-2026-10-22-prepared)). It is
+  the same file, so deploying it is one file copy and one restart; `start.sh` is unchanged.
+
+`overlay/patch_output_token_split.py` (runtime, both ranks, wired in `start.sh`),
+`tests/test_output_token_split.py`, `scripts/dsml_stream_probe.py` (live check).
 
 ## The problem
 
@@ -136,24 +143,74 @@ Properties:
   model emitted the control token. This also holds for BOS/EOS and for DSML inside arguments.
 - **Gap 2 is fixed for non-streaming.** A quoted DSML block stays content. A real call that
   follows a quote is the only call.
-- **Not changed:**
-  - streaming;
-  - the prompt side;
-  - `count_reasoning_tokens`, which recounts from the ids; the test pins
-    `usage.completion_tokens_details` unchanged.
+- **Not changed:** the prompt side. (Streaming and the reasoning-token count were not changed
+  by the deployed version; the 2026-10-22 extension below changes both.)
 - **Cost:** 3.4 ms for an 18,349-token completion holding 300 quotes, on the rai CPU. One
   `decode_batch` and one trie-regex scan; the regex is built once per tokenizer.
 
-### Not fixed (documented)
+## Streaming and the reasoning-token count (2026-10-22, prepared)
 
-- **Streaming still matches DSML by text (gap 2, streaming).** A quoted `<｜DSML｜ calls>`
-  block still opens a tool call in a stream; the test pins this as a characterization. A fix
-  needs the lexer to accept `｜DSML｜` inside its marker terminals only when it came from id
-  128825. The masking approach does not carry over: delta text and delta ids do not align
-  exactly (detokenizer hold-back, stop-string buffering), and a quote can straddle deltas.
-- **`count_reasoning_tokens`** (non-streaming usage) feeds the decoded text plus all ids in
-  one delta, so it shares the `rfind` anchor issue above. It only matters when the per-token
-  decode differs from the text. On both recorded completions it is correct (0 and 47).
+**Why it matters more than the non-streaming fix:** 7,696 of the 7,715 caller requests in
+repl's record since 10-14 are `stream: true` (dsh and Hermes). The deployed non-streaming fix
+covers almost none of the agent traffic.
+
+**Live evidence** (`scripts/dsml_stream_probe.py`, gb10 kit, 2026-10-22, before this change;
+`_repl_measurement_stash/ots-stream-20261022/probe-before.json`):
+
+- Asked to copy a DSML block verbatim, the model wrote it with ordinary tokens (no id 128825
+  in its 59 ids).
+- The stock stream returned a `get_weather {"city": "Paris"}` tool call and the content
+  `` ```\n\n```\n\ndone ``. An agent would run a call the model never made.
+- Real calls, streamed, thinking off and on: correct, 6 × id 128825 each.
+
+**Mechanism.** The stream parser (`StreamingParserEngine`) gets each delta's text and ids. Its
+id-matched terminals are `</think>`, `<think>` and the specials (DROP). The V4.1 DSML markers
+(`<｜DSML｜ calls>`, invoke, parameter and their closers) are multi-token strings, so
+`token_id_terminals` cannot resolve them and the lexer matches them by text. The same text
+matching inside a real call's arguments ends the call early. A path argument holding quoted
+markers became `read_file {"path": "docs/"}` plus a call to a tool named `x`.
+
+**The change** is in `DelegatingParser.parse_delta`, the path that both chat and Responses
+streaming use:
+
+1. **Track where the added tokens' text lands.** Per request, the ids are followed as runs
+   between added-token ids. At each added token, the run before it is decoded with the same
+   Rust backend as the non-streaming split, so the token's character position in the stream
+   is known. Only tokens whose text holds `｜` are kept.
+2. **Hide the other `｜`s.** Every DSML marker holds `｜DSML｜`, which a quote spells
+   `｜` `DS` `ML` `｜`. Each `｜` in the delta text that is not inside a real added token's
+   text is replaced by U+FDD0, a Unicode noncharacter that no tokenizer emits, before the
+   stock `parse_delta` runs. A quote can then never complete a marker. This works one
+   character at a time, so a quote split over deltas is covered.
+3. **Put them back.** The returned delta's content, reasoning and tool-call names and
+   arguments get `｜` back. All JSON on this path is `ensure_ascii=False`, so the character
+   survives argument conversion.
+4. **Never worse than stock:**
+   - a real added token's text must be where its ids put it; otherwise the hiding stops for
+     the request, logged once (`DeepSeek V4.1 output token split: streaming: …`);
+   - while a real `｜`-token's text is still held back (a stop string makes the detokenizer
+     hold back its length − 1 characters), that delta is left as it is;
+   - any exception stops the hiding for the request, logged once;
+   - a literal U+FDD0 in the text stops the hiding before anything is hidden. If it comes
+     after a hidden quote, it comes back as `｜` (logged; no model output has held one).
+5. **Specials.** The engine parser's `adjust_request` sets `skip_special_tokens=False` on every
+   request, so the stream holds every added token's string, specials included. The stop
+   token's text is never streamed.
+
+**The non-streaming reasoning-token count.** `ParserEngineReasoningAdapter.
+count_reasoning_tokens` re-parses `tokenizer.decode(ids)` in one feed. DSML markers are text
+there too, so a DSML quote in the reasoning ended it: the count was 4 instead of 62
+(`dsml_quote_in_reasoning`). With such a quote, the count now parses the masked text. The
+`rfind` concern documented here before does not move the count: when the anchor rebuild
+misplaces `</think>`, the token counts still follow the id groups (`count_quote` pins 7 on
+both trees).
+
+**Cost:** 10–12 ms over 40 ms of stock parsing for an 18,349-token stream in 4-token deltas
+(4,588 deltas, about 2.4 µs per delta), on the rai CPU.
+
+**Not covered:** the stock stream's own reasoning-token usage at 1-token deltas undercounts by
+the tokens whose text is empty (a character split over byte tokens: 24 instead of 26). It is
+the image's, unchanged, and the test pins it as such.
 
 ## Verification: `tests/test_output_token_split.py`
 
@@ -162,13 +219,14 @@ The test runs the image's own code on CPU (tree and venv from `scripts/dsv41_vll
 
 - completions are detokenized by the image's `IncrementalDetokenizer`;
 - they are parsed by `OpenAIServingChat.chat_completion_full_generator` (non-streaming) and
-  `chat_completion_stream_generator` (deltas of 3 tokens);
+  `chat_completion_stream_generator` (deltas of 3 tokens, and since the streaming extension
+  also 1 and 4: one DSpark step is up to 4 tokens), with streamed usage;
 - one Responses-API `parse` per case.
 
 Two trees: the image as `start.sh` leaves it today (tokenizer patches including the guard), and
 the same plus this patch.
 
-**Completions (14):**
+**Completions (21; the 7 added with the streaming extension are marked +):**
 
 - **`live_off` / `live_on`**, the recorded ones. Their ids were not saved, so they are rebuilt
   from the recorded raw decode: control ids at the recorded positions, text runs in the base
@@ -185,21 +243,34 @@ the same plus this patch.
   - a stop-string cut;
   - a cut UTF-8 character (`finish_reason: length`);
   - `live_on` spelled one character per token;
-  - two clean completions.
+  - two clean completions;
+  - + a DSML quote in reasoning before a real call (`dsml_quote_in_reasoning`);
+  - + DSML markers quoted inside a real call's argument (`dsml_markers_in_argument`);
+  - + a character split over byte tokens before a quoted `</think>` (`count_quote`);
+  - + a quote then a real call under a stop string (`dsml_quote_then_call_held`);
+  - + a real BOS mid-output before a quote and a call (`special_then_quote_call`);
+  - + bare `｜` text (`pipe_text`, clean).
+- **+ `live_stream_quote`:** the live probe's 59 ids. Stock must reproduce the live stream
+  (the bogus `get_weather` call and the emptied code block).
 
 **Pins:**
 
-- **Patched non-streaming** gives the expected reasoning, content and tool calls, and
-  `finish_reason` follows them.
-- **Expected = the stream.** The expectation equals the streaming result, except the two gap-2
-  cases, where streaming still opens a call.
-- **Stock is red** on every dirty case.
+- **Patched non-streaming and streaming** (every delta size) give the expected reasoning,
+  content and tool calls, and `finish_reason` follows them.
+- **Stock is red** on every dirty case: non-streaming everywhere, streaming on every DSML case.
 - **Clean completions and real calls:** identical on both trees, and they take the stock path.
-- **Unchanged:** streaming output, detokenized text and reasoning-token usage.
+- **Unchanged:** detokenized text; streams (and their usage) of every case without a DSML quote.
+- **Reasoning tokens:** non-streaming equals the ids before `</think>` (0 with thinking off);
+  so does the streamed count of the DSML cases at 3- and 4-token deltas.
 - **Responses:** the API's parse equals chat's.
-- **Fail-safes:** misaligned ids, a failing decode, a cut placeholder (a stock re-parse
-  follows) and a forged prefix all give the stock text parse, with exactly one log line.
+- **Fail-safes, non-streaming:** misaligned ids, a failing decode, a cut placeholder (a stock
+  re-parse follows) and a forged prefix all give the stock text parse, with exactly one log
+  line.
+- **Fail-safes, streaming:** misaligned ids and a literal U+FDD0 give the stock stream; a
+  failing decode and ids ahead of the text (the held-back rule) keep the real call. One log
+  line each.
 - **No fallback** is logged on the main cases.
+- **Cost:** the long stream's overhead stays under 0.05 ms per delta.
 - **Patch file:** anchors, drift refused, idempotency, and the `start.sh` wiring.
 
 **Red first.** A no-op patch (`DSV41_OTS_PATCH`, the parse as it is live today) gives 32
@@ -209,6 +280,17 @@ patch the suite is green:
 ```text
 Output token split on the real serving path OK (14 completions, chat full + stream generators,
 Responses parse, 3 fail-safes; 18349-token completion split in 3.35 ms; patch_output_token_split.py)
+```
+
+**Streaming extension, red first.** Against the deployed version (`DSV41_OTS_PATCH` = the
+`d68569a` file) the extended suite gives 26 problems: every DSML case's stream at all three
+delta sizes, the 4-vs-62 reasoning-token counts, and the missing stream path. With the
+extension it is green:
+
+```text
+Output token split on the real serving path OK (21 completions, chat full + stream generators
+in deltas of 1, 3, 4, Responses parse, 7 fail-safes; 18349-token completion split in 3.57 ms;
+18349-token stream (4588 deltas) +10.0 ms over 40.6 ms; patch_output_token_split.py)
 ```
 
 ### Mutants
@@ -230,6 +312,26 @@ suite run against it):
 | no restore in reasoning | `reasoning_quote` |
 | no stock re-parse after a cut placeholder | driver error (`None` unpacked) |
 
+Streaming extension: 13 of 15 killed, the 2 survivors equivalent (`/tmp/ots_mut/run.py`):
+
+| Mutant | Killed by |
+|---|---|
+| hide nothing | 29 problems (every DSML stream) |
+| hide real `｜` too | 33 problems (every real call) |
+| no check that an added token's text is where its ids put it | `stream_misaligned` |
+| no held-back rule | `stream_ids_ahead` (the real call lost) |
+| no restore | 69 problems |
+| restore content only | `reasoning_quote`, … |
+| restore no arguments | `control_text_in_argument`, … |
+| no stop on a literal U+FDD0 | `stream_literal_hide` |
+| run not reset after a decode | `dsml_markers_in_argument` (and fallbacks logged) |
+| count not patched | `dsml_quote_in_reasoning` 4 != 62 |
+| count on the unmasked text | `dsml_quote_in_reasoning` 4 != 62 |
+| count condition inverted | streamed usage changed |
+| drop partly streamed spans | `dsml_quote_then_call_held` (1-token deltas) |
+| *survived:* no "text ran ahead of its ids" check | equivalent: the span check catches the same desync at the next `｜` token, before a real one can be hidden |
+| *survived:* track every added token, not only those with `｜` | equivalent: detects a desync earlier, never changes which `｜` is hidden |
+
 ```bash
 scripts/dsv41_vllm_tree.sh /tmp/dsv41-vllm   # once; read-only on gb10
 DSV41_VLLM_TREE=/tmp/dsv41-vllm DSV41_VLLM_PYTHON=/tmp/dsv41-vllm/venv/bin/python \
@@ -237,6 +339,28 @@ DSV41_VLLM_TREE=/tmp/dsv41-vllm DSV41_VLLM_PYTHON=/tmp/dsv41-vllm/venv/bin/pytho
 ```
 
 Without the tree it checks only the `start.sh` wiring and prints a skip line.
+
+## Deploy the streaming extension (operator only, not done)
+
+One restart. Only `overlay/patch_output_token_split.py` changes; the kit's `start.sh` already
+runs it on both ranks.
+
+1. **Before the window, on rai:** run `tests/test_output_token_split.py`,
+   `tests/test_dsml_stream_probe.py` and the guard suites (as below).
+2. **Prepare the kit** (`gb10:/mnt/storage1/dsv41/exl3-kit`): back up the live file
+   (`cp -p overlay/patch_output_token_split.py overlay/patch_output_token_split.py.bak-pre-stream-<stamp>`,
+   md5 `95333605…`) and copy this repo's file over it.
+3. **Wait for idle** and **restart** exactly as in steps 3–4 below.
+4. **Logs:** head and worker show `DeepSeek V4.1 output token split patch: applied` and the guard
+   `applied`, no WARN; the SWA/YOCO lines are unchanged.
+5. **Verify:**
+   - `bash tests/test_smoke.sh http://192.168.1.97:8000` → 323;
+   - `python3 scripts/dsml_stream_probe.py`: `real-off` and `real-on` PASS, `quote` PASS (or
+     INCONCLUSIVE if the model did not quote; before the deploy it was FAIL);
+   - `_repl_measurement_stash/ots-dsml-ids-20261022/dsml_ids.py` still returns
+     `get_weather {"city": "Paris"}`, both modes;
+   - the head log has no `output token split: streaming:` line after the probe.
+6. **Rollback:** copy the `.bak-pre-stream-<stamp>` file back and restart the same way.
 
 ## Deploy (operator only)
 

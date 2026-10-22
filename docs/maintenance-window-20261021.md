@@ -223,9 +223,10 @@ The repl index is `docs/PROGRESS.md` 2026-10-22 (repl `d0d0823`).
   - the organic own-output reuse shortfall (above);
   - the > 32K decode split (above);
   - head memory.
-- **Open, documented gaps:**
-  - streaming still matches DSML by text;
-  - non-streaming `count_reasoning_tokens` shares the `rfind` anchor issue
-    ([output-token-split-20261022.md](output-token-split-20261022.md) §Not fixed).
+- **Prepared for the next window (one file, one restart):** the streaming DSML fix and the
+  non-streaming reasoning-token count
+  ([output-token-split-20261022.md](output-token-split-20261022.md) §Streaming). A live probe
+  showed the stock stream turning a quoted DSML block into a tool call. The documented `rfind`
+  concern about the count did not hold; the real count bug was a DSML quote in the reasoning.
 - **Optional:** the AIME 32-sample protocol, to separate 99.9 % from ~95 %
   ([deepinfer-bench-protocol.md](deepinfer-bench-protocol.md) §8).

@@ -34,8 +34,27 @@ stop token, a stop string or held-back UTF-8 only shorten it), else the text is 
 as before.  An added-token string inside a run was spelled with ordinary tokens, so it
 is replaced by a nonce placeholder for the parse and restored in its result (reasoning,
 content, tool-call names and arguments).  The parse itself is the image's, unchanged,
-and a text with no such string goes through it untouched.  Streaming is not changed
-(its tool markers are still matched by text: docs/output-token-split-20261022.md).
+and a text with no such string goes through it untouched.
+
+The non-streaming reasoning-token count (``ParserEngineReasoningAdapter.
+count_reasoning_tokens``) re-parses ``tokenizer.decode(ids)`` in one feed, where DSML
+markers are matched by text too: a DSML quote in the reasoning ended it (4 reasoning
+tokens instead of 62 in the test).  With such a quote the count parses the masked text.
+(The ``rfind`` anchor rebuild does not move the count: its token counts follow the id
+groups.)
+
+Streaming (2026-10-22): its DSML markers are matched by text, so a quoted
+``<｜DSML｜ calls>`` block opened a tool call.  Every DSML marker holds ``｜DSML｜``, which
+a real call emits as id 128825, and a quote spells with ordinary tokens
+(``｜`` ``DS`` ``ML`` ``｜``).  ``DelegatingParser.parse_delta`` now follows where each
+added token's text lands in the stream (runs decoded as above) and hides every ``｜`` an
+ordinary token produced behind U+FDD0, a noncharacter no tokenizer emits, so a quote can
+never complete a marker; the delta it returns gets the ``｜`` back.  One character at a
+time, so a quote split over deltas is covered.  The engine parser's ``adjust_request``
+sets skip_special_tokens=False, so the text holds every added token's string, specials
+included (the stop token's is never streamed).  If an added token's text does not land
+where its ids put it, or is still held back, that delta is left as it is (and a mismatch
+stops the hiding for the request, logged once).  Clean streams are untouched.
 """
 from __future__ import annotations
 
@@ -177,27 +196,172 @@ def _ots_log(reason: str) -> None:
     )
 
 
+def _ots_splitter(tokenizer) -> _OutputTokenSplit | None:
+    entry = _OTS_SPLITTERS.get(id(tokenizer))
+    if entry is None or entry[0] is not tokenizer:
+        with _OTS_LOCK:
+            entry = _OTS_SPLITTERS.get(id(tokenizer))
+            if entry is None or entry[0] is not tokenizer:
+                usable = hasattr(tokenizer, "get_added_vocab") and hasattr(
+                    tokenizer, "backend_tokenizer"
+                )
+                entry = (tokenizer, _OutputTokenSplit(tokenizer) if usable else None)
+                _OTS_SPLITTERS[id(tokenizer)] = entry
+    return entry[1]
+
+
 def _ots_split(parser, text: str, token_ids) -> _OutputTokenSplitResult | None:
     """Mask BPE-spelled added-token strings in ``text`` (None: parse it as is)."""
     if not text or not token_ids or not getattr(parser, "_engine_based", False):
         return None
-    tokenizer = parser.model_tokenizer
     try:
-        entry = _OTS_SPLITTERS.get(id(tokenizer))
-        if entry is None or entry[0] is not tokenizer:
-            with _OTS_LOCK:
-                entry = _OTS_SPLITTERS.get(id(tokenizer))
-                if entry is None or entry[0] is not tokenizer:
-                    usable = hasattr(tokenizer, "get_added_vocab") and hasattr(
-                        tokenizer, "backend_tokenizer"
-                    )
-                    entry = (tokenizer, _OutputTokenSplit(tokenizer) if usable else None)
-                    _OTS_SPLITTERS[id(tokenizer)] = entry
-        splitter = entry[1]
+        splitter = _ots_splitter(parser.model_tokenizer)
         return splitter.split(text, list(token_ids)) if splitter is not None else None
     except Exception as error:  # never fail a request over this
         _ots_log(f"{type(error).__name__}: {error}")
         return None
+
+
+def _ots_count_reasoning(parser, token_ids) -> int | None:
+    """The non-streaming reasoning-token count on the masked text (None: count as is)."""
+    adapter = parser._reasoning_parser
+    if (
+        not token_ids
+        or getattr(adapter, "_streaming_count_valid", True)
+        or not hasattr(adapter, "_counting_parser_engine")
+    ):
+        return None
+    try:
+        split = _ots_split(parser, adapter.model_tokenizer.decode(token_ids), token_ids)
+        if split is None:
+            return None
+        if adapter._counting_parser_engine is None:
+            adapter._counting_parser_engine = adapter._parser_engine_cls(
+                adapter.model_tokenizer, **adapter._parser_engine_kwargs
+            )
+        adapter._counting_parser_engine._single_pass_parse(split.text, token_ids)
+        return adapter._counting_parser_engine.count_reasoning_tokens(token_ids)
+    except Exception as error:  # never fail a request over this
+        _ots_log(f"{type(error).__name__}: {error}")
+        return None
+
+
+_OTS_PIPE = "\uff5c"  # "｜": every DSML marker holds two (inside ｜DSML｜, id 128825)
+_OTS_HIDE = "\ufdd0"  # a Unicode noncharacter: no tokenizer's text holds it
+
+
+class _OutputTokenStream:
+    """One streamed completion: hide the "｜"s its ordinary tokens produced."""
+
+    __slots__ = ("_splitter", "_run", "_end", "_spans", "_seen", "active", "hidden")
+
+    def __init__(self, splitter: _OutputTokenSplit) -> None:
+        self._splitter = splitter
+        self._run: list[int] = []  # ordinary ids since the last added token
+        self._end = 0  # length of the decode of the ids before self._run
+        self._spans: list[tuple[int, str]] = []  # added tokens with a "｜", not all streamed
+        self._seen = 0  # characters streamed so far
+        self.active = True
+        self.hidden = 0  # "｜"s hidden so far (the deltas need them back)
+
+    def _stop(self, reason: str, text: str) -> str:
+        self.active = False
+        _ots_log(f"streaming: {reason}")
+        return text
+
+    def hide(self, text: str, token_ids) -> str:
+        """``text`` with every "｜" an ordinary token produced replaced by _OTS_HIDE."""
+        if not self.active:
+            return text
+        texts = self._splitter._texts
+        for token_id in token_ids:
+            token_text = texts.get(token_id)
+            if token_text is None:
+                self._run.append(token_id)
+                continue
+            if self._run:
+                self._end += len(self._splitter._backend.decode(self._run, skip_special_tokens=False))
+                self._run = []
+            if self._end < self._seen:
+                return self._stop("the text ran ahead of its token ids", text)
+            if _OTS_PIPE in token_text:
+                self._spans.append((self._end, token_text))
+            self._end += len(token_text)
+        start = self._seen
+        self._seen += len(text)
+        if _OTS_HIDE in text:
+            return self._stop("the text holds the hiding character", text)
+        real: set[int] = set()
+        held = False
+        kept: list[tuple[int, str]] = []
+        for span_start, token_text in self._spans:
+            low, high = max(span_start, start), min(span_start + len(token_text), self._seen)
+            if low < high:
+                if text[low - start : high - start] != token_text[low - span_start : high - span_start]:
+                    return self._stop("an added token's text is not where its ids put it", text)
+                real.update(range(low - start, high - start))
+            if span_start + len(token_text) > self._seen:
+                kept.append((span_start, token_text))
+                held = held or span_start >= self._seen
+        self._spans = kept
+        if held:
+            return text  # an added token's text is not streamed yet: which "｜" is real is open
+        at = text.find(_OTS_PIPE)
+        if at < 0:
+            return text
+        out: list[str] = []
+        last = 0
+        while at >= 0:
+            if at not in real:
+                out.append(text[last:at])
+                out.append(_OTS_HIDE)
+                last = at + 1
+                self.hidden += 1
+            at = text.find(_OTS_PIPE, at + 1)
+        if not out:
+            return text
+        out.append(text[last:])
+        return "".join(out)
+
+
+def _ots_stream(parser) -> _OutputTokenStream | None:
+    stream = getattr(parser, "_ots_stream_state", None)
+    if stream is None:
+        stream = False
+        if getattr(parser, "_engine_based", False):
+            try:
+                splitter = _ots_splitter(parser.model_tokenizer)
+            except Exception as error:  # never fail a request over this
+                _ots_log(f"{type(error).__name__}: {error}")
+                splitter = None
+            if splitter is not None:
+                stream = _OutputTokenStream(splitter)
+        parser._ots_stream_state = stream
+    return stream or None
+
+
+def _ots_hide(stream: _OutputTokenStream, text: str, token_ids) -> str:
+    try:
+        return stream.hide(text, token_ids)
+    except Exception as error:  # never fail a request over this
+        return stream._stop(f"{type(error).__name__}: {error}", text)
+
+
+def _ots_unhide(delta):
+    """Put the hidden "｜"s back in a DeltaMessage."""
+    if delta is None:
+        return delta
+    for field in ("content", "reasoning"):
+        value = getattr(delta, field, None)
+        if value and _OTS_HIDE in value:
+            setattr(delta, field, value.replace(_OTS_HIDE, _OTS_PIPE))
+    for call in getattr(delta, "tool_calls", None) or ():
+        function = getattr(call, "function", None)
+        for field in ("name", "arguments"):
+            value = getattr(function, field, None) if function is not None else None
+            if value and _OTS_HIDE in value:
+                setattr(function, field, value.replace(_OTS_HIDE, _OTS_PIPE))
+    return delta
 '''
 
 ANCHORS: list[tuple[str, str]] = [
@@ -254,6 +418,67 @@ ANCHORS: list[tuple[str, str]] = [
         "            enable_auto_tools=enable_auto_tools,\n"
         "        )\n"
         "        return reasoning, content, tool_calls\n",
+    ),
+    (
+        "    def parse_delta(\n"
+        "        self,\n"
+        "        delta_text: str,\n"
+        "        delta_token_ids: list[int],\n"
+        "        request: ChatCompletionRequest | ResponsesRequest,\n"
+        "        prompt_token_ids: list[int] | None = None,\n"
+        "        *,\n"
+        "        finished: bool,\n"
+        "    ) -> DeltaMessage | None:\n"
+        "        self._initialize_history_tool_call_cnt(request)\n"
+        "        state = self._stream_state\n",
+        "    def parse_delta(\n"
+        "        self,\n"
+        "        delta_text: str,\n"
+        "        delta_token_ids: list[int],\n"
+        "        request: ChatCompletionRequest | ResponsesRequest,\n"
+        "        prompt_token_ids: list[int] | None = None,\n"
+        "        *,\n"
+        "        finished: bool,\n"
+        "    ) -> DeltaMessage | None:\n"
+        "        # [DSV41_OUTPUT_TOKEN_SPLIT] a \"｜\" an ordinary token produced cannot\n"
+        "        # complete DSML markup: hidden from the parse, put back in the delta.\n"
+        "        stream = _ots_stream(self)\n"
+        "        if stream is not None:\n"
+        "            delta_text = _ots_hide(stream, delta_text, delta_token_ids)\n"
+        "        delta_message = self._ots_parse_delta(\n"
+        "            delta_text, delta_token_ids, request, prompt_token_ids, finished=finished\n"
+        "        )\n"
+        "        if stream is not None and stream.hidden:\n"
+        "            delta_message = _ots_unhide(delta_message)\n"
+        "        return delta_message\n"
+        "\n"
+        "    def _ots_parse_delta(\n"
+        "        self,\n"
+        "        delta_text: str,\n"
+        "        delta_token_ids: list[int],\n"
+        "        request: ChatCompletionRequest | ResponsesRequest,\n"
+        "        prompt_token_ids: list[int] | None = None,\n"
+        "        *,\n"
+        "        finished: bool,\n"
+        "    ) -> DeltaMessage | None:\n"
+        "        self._initialize_history_tool_call_cnt(request)\n"
+        "        state = self._stream_state\n",
+    ),
+    (
+        "    def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:\n"
+        '        """Count reasoning tokens through the configured reasoning parser."""\n'
+        "        if self._reasoning_parser is None:\n"
+        "            return 0\n"
+        "        return self._reasoning_parser.count_reasoning_tokens(token_ids)\n",
+        "    def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:\n"
+        '        """Count reasoning tokens through the configured reasoning parser."""\n'
+        "        if self._reasoning_parser is None:\n"
+        "            return 0\n"
+        "        # [DSV41_OUTPUT_TOKEN_SPLIT] the non-streaming count, on the masked text.\n"
+        "        count = _ots_count_reasoning(self, token_ids)\n"
+        "        if count is not None:\n"
+        "            return count\n"
+        "        return self._reasoning_parser.count_reasoning_tokens(token_ids)\n",
     ),
 ]
 

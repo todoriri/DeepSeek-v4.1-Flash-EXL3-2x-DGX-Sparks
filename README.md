@@ -322,7 +322,7 @@ higher) and restart.
 | `overlay/engram_file_backend.py`, `overlay/row_store.cpp` | file-backed `ParallelEngramEmbedding` |
 | `overlay/patch_reasoning_effort_mapping.py` | `deepseek_v41` encoder effort names → official low=50 / high=75 / max=100 (runtime patch, both ranks) |
 | `overlay/patch_control_token_injection.py` | `deepseek_v41` prompts: control tokens only where the encoder inserted them; control-token text in request content encodes as plain text (runtime patch, both ranks; [doc](docs/control-token-injection-20261020.md)) |
-| `overlay/patch_output_token_split.py` | non-streaming parse (chat, batch, Responses): control-token strings the model spelled with ordinary tokens stay text, as in streaming; real control tokens and clean outputs unchanged (runtime, both ranks; prepared, not deployed; [doc](docs/output-token-split-20261022.md)) |
+| `overlay/patch_output_token_split.py` | output parse (chat, batch, Responses): control-token strings the model spelled with ordinary tokens stay text; real control tokens and clean outputs unchanged. Non-streaming live since 2026-10-22; the streaming DSML part and the reasoning-token count are prepared, not deployed (runtime, both ranks; [doc](docs/output-token-split-20261022.md)) |
 | `extensions/cooperative_moe/` | Optional decode MoE; not loaded unless `EXL3_OVERLAY_HOST` selects its overlay |
 | `files/exl3_k_map.json` | Per-tensor K |
 | `files/chat_template.jinja` | Port of DeepSeek `encoding.py` (parity reference; not used at serve time under `--tokenizer-mode deepseek_v41`) |
@@ -335,6 +335,7 @@ higher) and restart.
 | `scripts/effort_ab.py` | live A/B of reasoning-effort budgets on graded math + coding tasks |
 | `scripts/deepinfer_bench.py`, `scripts/vendor/deepinfer_eval/` | DeepSeek's AIME 2026 / GPQA Diamond protocol (DeepInfer `eval/`, vendored verbatim) over the chat API, rule judge, idle-gated + budgeted, resumable ([doc](docs/deepinfer-bench-protocol.md)) |
 | `scripts/control_token_probe.py` | live control-token injection probe: `/tokenize` + a chat-completions arm (`max_tokens=1`), clean-id baseline `--save`/`--compare` |
+| `scripts/dsml_stream_probe.py` | live streamed-DSML check: real `get_weather` calls (thinking off/on) parse, a DSML block the model quotes stays content (3 short requests, idle-gated; [doc](docs/output-token-split-20261022.md)) |
 | `scripts/dsv41_vllm_tree.sh` | the image's vLLM Python tree + a CPU venv with its pins, for `tests/test_control_token_render_path.py` (read-only on gb10) |
 | `scripts/prefix_retention_agent.py` | live prefix-cache reuse vs ideal on agent-shaped sessions |
 | `overlay/patch_yoco_prefill.py`, `overlay/dsv41_yoco.py` | decoder-SWA bounded replay (YOCO prefill truncation), **off by default** (`DSV41_YOCO_PREFILL=compact`; [doc](docs/yoco-prefill-truncation.md)) |
@@ -478,7 +479,11 @@ also drops BOS/EOS by text, which is why a quoted `<｜end▁of▁sentence｜>` 
 `<｜DSML｜ calls>` block even comes back as a tool call. `overlay/patch_output_token_split.py`
 masks the strings that the ids show the model spelled with ordinary tokens, runs the image's
 parse unchanged, and restores them. It is tested on the image's real chat serving code and is
-**live on the gb10 kit since 2026-10-22**. Streaming still matches DSML markers by text.
+**live on the gb10 kit since 2026-10-22**. Streaming, which nearly all agent traffic uses, still
+matches DSML markers by text on the live kit: a live probe (`scripts/dsml_stream_probe.py`) got a
+`get_weather` call the model never made when it quoted a DSML block. The fix, prepared and not
+deployed, hides each `｜` the model spelled with ordinary tokens from the stream parser and puts it
+back in the delta.
 
 ## Upstream display-reserve KV (issue #23) — reviewed, not adopted
 
@@ -599,7 +604,9 @@ DSV41_VLLM_TREE=/tmp/dsv41-vllm DSV41_VLLM_PYTHON=/tmp/dsv41-vllm/venv/bin/pytho
   DSV41_TOKENIZER_DIR=/path/to/DeepSeek-V4.1-Flash python3 tests/test_control_token_render_path.py
 DSV41_VLLM_TREE=/tmp/dsv41-vllm DSV41_VLLM_PYTHON=/tmp/dsv41-vllm/venv/bin/python \
   DSV41_TOKENIZER_DIR=/path/to/DeepSeek-V4.1-Flash python3 tests/test_output_token_split.py
+python3 tests/test_dsml_stream_probe.py
 python3 scripts/control_token_probe.py --base http://<head>:${PORT}   # live; chat arm = 12 one-token requests
+python3 scripts/dsml_stream_probe.py --base http://<head>:${PORT}     # live; 3 short streamed requests
 ```
 
 The YOCO prefill-truncation tests need `torch` and `numpy` (CPU), but not vLLM. One

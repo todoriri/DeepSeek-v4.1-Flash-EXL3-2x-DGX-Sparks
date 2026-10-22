@@ -223,7 +223,8 @@ Both are traced, and fixed for non-streaming, in
 [output-token-split-20261022.md](output-token-split-20261022.md)
 (`overlay/patch_output_token_split.py`, live since 2026-10-22). The same trace explains the
 quoted `<｜end▁of▁sentence｜>` drop below: the engine drops BOS/EOS **by text** when it has no
-ids (`_build_drop_info`). Gap 2 stays open in streaming.
+ids (`_build_drop_info`). Gap 2 is open in streaming on the live kit; its fix is prepared, not
+deployed (same doc, §Streaming).
 
 ## Verification
 

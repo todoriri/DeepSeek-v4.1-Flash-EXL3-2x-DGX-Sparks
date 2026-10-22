@@ -28,17 +28,33 @@ Completions:
     Stock must reproduce the recorded parsed reasoning/content byte for byte;
   * tool_off / tool_on: real tool calls with their live ids (2026-10-22, every
     ``｜DSML｜`` is id 128825);
+  * live_stream_quote: the live quote from scripts/dsml_stream_probe.py (2026-10-22): the
+    model copied a DSML block with ordinary tokens and the stock stream returned a
+    get_weather call (stock must reproduce that stream);
   * synthetic: a quoted ``</think>`` inside reasoning, quoted BOS/``<think>``, a quoted
     DSML call block (gap 2), a quote followed by a real call, control text inside a real
     call's argument, a stop-string cut, a cut UTF-8 character, the live_on text spelled
     one character per token, and clean completions.
 
-Pins: patched non-streaming gives the expected reasoning / content / tool calls (the
-streaming result, except gap 2 where streaming still opens a call on a quoted DSML block);
-stock does not; clean completions and real tool calls are identical on both trees and
-take the stock path; streaming and the reasoning-token count are unchanged; misaligned
-ids, a failing decode or a cut placeholder fall back to the stock parse; the Responses
-API's parse gets the same split; anchors, idempotency and start.sh wiring.
+Streaming (2026-10-22 follow-up): stock streaming matches DSML markers by text, so a
+quoted DSML block opened a tool call (gap 2).  The patch hides every "｜" an ordinary
+token produced from ``parse_delta`` and puts it back in the delta.  Added cases: a DSML
+quote in reasoning before a real call (it ended the reasoning, and both reasoning-token
+counts said 4 instead of 62), DSML markers quoted inside a real call's argument, bare "｜"
+text, a character split over byte tokens before a quoted ``</think>`` (the stock
+non-streaming count survives it: its token counts follow the id groups, not the rfind
+text split), a stop string (the detokenizer holds back its length - 1 characters) and a
+real BOS mid-output.  Streams are cut in deltas of 1, 3 and 4 tokens.
+
+Pins: patched non-streaming and streaming give the expected reasoning / content / tool
+calls at every delta size, and stock does not on the dirty cases; clean completions and
+real tool calls are identical on both trees and take the stock path; streams and their
+reasoning-token counts are unchanged except where a DSML quote was; the non-streaming
+count is the ids before ``</think>``; misaligned ids, a failing decode or a cut
+placeholder fall back to the stock parse; in a stream, misaligned ids or a literal U+FDD0
+give the stock stream, and a failing decode or ids ahead of the text keep the real call,
+each with one log line;
+the Responses API's parse gets the same split; anchors, idempotency and start.sh wiring.
 
     DSV41_VLLM_TREE=/tmp/dsv41-vllm DSV41_VLLM_PYTHON=/tmp/dsv41-vllm/venv/bin/python \\
     DSV41_TOKENIZER_DIR=/path/to/DeepSeek-V4.1-Flash python3 tests/test_output_token_split.py
@@ -63,6 +79,7 @@ FIXTURES = ROOT / "tests" / "fixtures" / "dsv41_output_split"
 PATCH = ROOT / "overlay" / "patch_output_token_split.py"
 MODEL = "deepseek-v4.1-flash"
 EOS, BOS, THINK, END_THINK, DSML = 1, 0, 128821, 128822, 128825
+STEPS = (1, 4)  # extra stream delta sizes (tokens), besides 3; 4 = one DSpark step (k = 3)
 # The image's non-streaming / streaming parse path (sha256:0aecf9f5..., vLLM 0.1.dev20904),
 # unpatched.
 MANIFEST = {
@@ -176,6 +193,8 @@ def cases(samples: dict[str, dict], tool_ids: dict[str, dict], texts: dict[int, 
     quote = "The call format is " + QUOTED_CALL + " (plain text here)."
     reasoning_quote = "The notes contain a literal </think> marker and " + EOS_TEXT + "; ignore them."
     arg = "notes/</think>" + EOS_TEXT + "｜DSML｜.txt"
+    plan = "The format is " + QUOTED_CALL + ", so call it."
+    markers = 'docs/</｜DSML｜ parameter> and </｜DSML｜ invoke> and <｜DSML｜ invoke name="x">.md'
     out = {
         "live_off": dict(
             parts=recorded_parts(samples["off"], texts), kwargs=off, tools=[READ], kind="dirty",
@@ -238,7 +257,45 @@ def cases(samples: dict[str, dict], tool_ids: dict[str, dict], texts: dict[int, 
             kwargs=off, tools=[READ], kind="clean",
             expect={"reasoning": None, "content": "Markup that is not a control token: <div>x</div> |DSML| <thinking> <|x|>.", "calls": []},
         ),
+        "dsml_quote_in_reasoning": dict(
+            parts=[plan, END_THINK] + real_call("get_weather", "city", "Brest"), kwargs=on, tools=[WEATHER], kind="gap2",
+            expect={"reasoning": plan, "content": None, "calls": [["get_weather", '{"city": "Brest"}']]},
+        ),
+        "dsml_markers_in_argument": dict(
+            parts=real_call("read_file", "path", markers), kwargs=off, tools=[READ], kind="gap2",
+            expect={"reasoning": None, "content": None, "calls": [["read_file", json.dumps({"path": markers}, ensure_ascii=False)]]},
+        ),
+        "count_quote": dict(
+            parts=["Plan with 𝔊 inside.", END_THINK, "The notes quote `</think>` here.", EOS], kwargs=on, tools=[READ],
+            kind="dirty",
+            expect={"reasoning": "Plan with 𝔊 inside.", "content": "The notes quote `</think>` here.", "calls": []},
+        ),
+        # A stop string makes the detokenizer hold back its length - 1 characters, so a
+        # real ｜DSML｜'s text can trail its id by a delta or more.
+        "dsml_quote_then_call_held": dict(
+            parts=[quote + "\n\n"] + real_call("get_weather", "city", "Brest"), kwargs=off, tools=[WEATHER],
+            stop=["#a stop string that never matches#"], kind="held",
+            expect={"reasoning": None, "content": quote + "\n\n", "calls": [["get_weather", '{"city": "Brest"}']]},
+        ),
+        # A real special token mid-output (BOS, id 0).  The engine parser's adjust_request sets
+        # skip_special_tokens=False, so its text is in the stream; the parser drops it by id.
+        "special_then_quote_call": dict(
+            parts=["Odd start ", BOS, quote + "\n\n"] + real_call("get_weather", "city", "Brest"), kwargs=off, tools=[WEATHER],
+            kind="gap2",
+            expect={"reasoning": None, "content": "Odd start " + quote + "\n\n", "calls": [["get_weather", '{"city": "Brest"}']]},
+        ),
+        "pipe_text": dict(
+            parts=["Table: a｜b｜c, a bar ｜ alone, ｜DS and ML｜ apart.", EOS], kwargs=off, tools=[READ], kind="clean",
+            expect={"reasoning": None, "content": "Table: a｜b｜c, a bar ｜ alone, ｜DS and ML｜ apart.", "calls": []},
+        ),
     }
+    # The live quote (scripts/dsml_stream_probe.py, 2026-10-22): the model copied a DSML
+    # block with ordinary tokens and the stock stream turned it into a get_weather call.
+    live_quote = json.loads((FIXTURES / "stream-quote-20261022.json").read_text(encoding="utf-8"))
+    out["live_stream_quote"] = dict(
+        ids=live_quote["token_ids"], kwargs=live_quote["kwargs"], tools=[WEATHER], kind="gap2",
+        expect={"reasoning": None, "content": live_quote["raw"][: -len(EOS_TEXT)], "calls": []},
+    )
     for tag, record in tool_ids.items():
         out[f"tool_{tag}"] = dict(
             ids=record["token_ids"], kwargs=record["kwargs"], tools=[WEATHER], kind="clean",
@@ -362,9 +419,9 @@ def driver(out_path: str, tokenizer_dir: str) -> None:
             record["split"] = abstract_parser._ots_split(parser, text, ids) is not None
         return record
 
-    def streaming(case: dict, ids: list[int], prompt: list[int]) -> dict:
-        body = request(case, stream=True)
-        steps, _ = detokenize(case, body, ids, prompt, 3)
+    def streaming(case: dict, ids: list[int], prompt: list[int], step: int = 3) -> dict:
+        body = request(case, stream=True, stream_options={"include_usage": True})
+        steps, _ = detokenize(case, body, ids, prompt, step)
         stop = "STOP" if case.get("stop") else None
         outputs = [
             RequestOutput("r", None, prompt, None, [completion(text, chunk, finish, stop if finish else None)], finish is not None)
@@ -372,7 +429,7 @@ def driver(out_path: str, tokenizer_dir: str) -> None:
         ]
 
         async def collect() -> dict:
-            record = {"reasoning": "", "content": "", "calls": {}, "errors": []}
+            record = {"reasoning": "", "content": "", "calls": {}, "errors": [], "reasoning_tokens": None}
             async for line in chat.chat_completion_stream_generator(
                 body, generate(outputs), "r", MODEL, [], tokenizer, RequestResponseMetadata(request_id="r"),
                 chat_template_kwargs=case["kwargs"],
@@ -382,6 +439,8 @@ def driver(out_path: str, tokenizer_dir: str) -> None:
                 chunk = json.loads(line[6:])
                 if "error" in chunk:
                     record["errors"].append(chunk["error"])
+                if chunk.get("usage"):
+                    record["reasoning_tokens"] = (chunk["usage"].get("completion_tokens_details") or {}).get("reasoning_tokens")
                 for choice in chunk.get("choices", []):
                     delta = choice.get("delta") or {}
                     record["reasoning"] += delta.get("reasoning") or ""
@@ -406,6 +465,7 @@ def driver(out_path: str, tokenizer_dir: str) -> None:
             "control": [[i, t] for i, t in enumerate(ids) if t in texts],
             "nonstream": non_streaming(case, ids, prompt),
             "stream": streaming(case, ids, prompt),
+            "streams": {str(step): streaming(case, ids, prompt, step) for step in STEPS},
         }
     for tag, sample in samples.items():
         out["recorded"][tag] = {"length": sample["length"], "control": sample["control"]}
@@ -426,6 +486,92 @@ def driver(out_path: str, tokenizer_dir: str) -> None:
     if patched:
         out["extras"]["logged_main"] = list(logged)
         out["extras"].update(failsafe(abstract_parser, chat, tokenizer, all_cases, ids_of, request, out, logged))
+    if patched and hasattr(abstract_parser.DelegatingParser, "_ots_parse_delta"):
+
+        def deltas(case: dict, step: int = 3) -> tuple[list[int], list]:
+            ids = ids_of(case)
+            prompt = tokenizer.apply_chat_template(messages, tools=case["tools"], **case["kwargs"])
+            body = request(case, stream=True)
+            return prompt, [(list(chunk), text, finish) for chunk, text, finish in detokenize(case, body, ids, prompt, step)[0]]
+
+        def feed(case: dict, prompt: list[int], steps: list, stock: bool) -> list:
+            """parse_delta (patched) or the image's own body (_ots_parse_delta), as the stream generator calls it."""
+            body = request(case, stream=True)
+            parser = chat.parser_cls(tokenizer, body.tools, chat_template_kwargs=case["kwargs"], model_config=None)
+            parse = parser._ots_parse_delta if stock else parser.parse_delta
+            got = []
+            for chunk, text, finish in steps:
+                delta = parse(text, chunk, body, prompt, finished=finish is not None)
+                dumped = delta.model_dump(exclude_none=True) if delta is not None else None
+                for call in (dumped or {}).get("tool_calls") or []:
+                    call.pop("id", None)  # random per parser
+                got.append(dumped)
+            return got
+
+        def calls_of(got: list) -> list:
+            calls: dict = {}
+            for delta in got:
+                for call in (delta or {}).get("tool_calls") or []:
+                    slot = calls.setdefault(call["index"], ["", ""])
+                    slot[0] += (call.get("function") or {}).get("name") or ""
+                    slot[1] += (call.get("function") or {}).get("arguments") or ""
+            return [calls[index] for index in sorted(calls)]
+
+        streams: dict = {}
+
+        def attempt_stream(label: str, case: dict, prompt: list[int], steps: list) -> None:
+            del logged[:]
+            mine, stock = feed(case, prompt, steps, False), feed(case, prompt, steps, True)
+            streams[label] = {"same_as_stock": mine == stock, "calls": calls_of(mine), "logged": list(logged)}
+
+        quoted = all_cases["dsml_quote_then_call"]
+        prompt, steps = deltas(quoted)
+        # An added token the text does not hold: the stream is parsed as the image does.
+        attempt_stream("stream_misaligned", quoted, prompt, [([DSML] + steps[0][0], steps[0][1], steps[0][2])] + steps[1:])
+        # Ids claiming more text than the stream holds, in the delta with the first real
+        # ｜DSML｜: its text lands before where the ids put it.  That delta is left as it
+        # is (the call parses), and the mismatch further on stops the hiding.
+        first = next(i for i, (chunk, _, _) in enumerate(steps) if DSML in chunk)
+        long_token = next(i for i in range(1000, 60000) if len(base.decode([i])) >= 12 and "｜" not in base.decode([i]))
+        ahead = steps[:first] + [([long_token] + steps[first][0], steps[first][1], steps[first][2])] + steps[first + 1 :]
+        attempt_stream("stream_ids_ahead", quoted, prompt, ahead)
+        splitter = abstract_parser._OTS_SPLITTERS[id(tokenizer)][1]
+        backend = splitter._backend
+
+        class Broken:
+            def decode(self, *args, **kwargs):
+                raise RuntimeError("decode failed")
+
+        splitter._backend = Broken()
+        try:
+            attempt_stream("stream_decode_error", quoted, prompt, steps)
+        finally:
+            splitter._backend = backend
+        # A literal U+FDD0 before any hiding: the stock stream.
+        odd = dict(quoted, parts=["Odd \ufdd0 char. " + quoted["parts"][0]] + quoted["parts"][1:])
+        attempt_stream("stream_literal_hide", odd, *deltas(odd))
+
+        # Cost: live_on's content repeated to ~24K tokens, in 4-token deltas.
+        case = all_cases["live_on"]
+        parts = case["parts"]
+        long_case = dict(case, parts=parts[: parts.index(END_THINK) + 1] + parts[parts.index(END_THINK) + 1 : -1] * 100 + [EOS])
+        long_prompt, long_steps = deltas(long_case, 4)
+        timing = {}
+        for label, stock in (("stock", True), ("patched", False)):
+            best = None
+            for _ in range(3):
+                started = time.perf_counter()
+                feed(long_case, long_prompt, long_steps, stock)
+                elapsed = time.perf_counter() - started
+                best = elapsed if best is None else min(best, elapsed)
+            timing[label] = best
+        streams["stream_long"] = {
+            "deltas": len(long_steps),
+            "tokens": sum(len(chunk) for chunk, _, _ in long_steps),
+            "overhead_ms": round((timing["patched"] - timing["stock"]) * 1000, 1),
+            "stock_ms": round(timing["stock"] * 1000, 1),
+        }
+        out["extras"].update(streams)
     Path(out_path).write_text(json.dumps(out, ensure_ascii=False), encoding="utf-8")
 
 
@@ -595,13 +741,34 @@ def check(stock: dict, patched: dict) -> list[str]:
             f"live_{tag}: stock non-streaming does not reproduce the recorded live parse",
         )
 
+    live_quote = json.loads((FIXTURES / "stream-quote-20261022.json").read_text(encoding="utf-8"))
+    got = _stream(stock["cases"]["live_stream_quote"]["stream"])
+    expect(
+        (got["content"], got["calls"]) == (live_quote["stream_content"], live_quote["stream_calls"]),
+        f"live_stream_quote: stock streaming {got} does not reproduce the live stream",
+    )
+
     for name, case in all_cases.items():
         want, kind = case["expect"], case["kind"]
         before, after = stock["cases"][name], patched["cases"][name]
+        dsml = kind in ("gap2", "held")
+        thinking = case["kwargs"].get("enable_thinking")
+        end = [i for i, token_id in after["control"] if token_id == END_THINK]
+        count = (end[0] if end else None) if thinking else 0
         expect(_parse(after["nonstream"]) == want, f"{name}: patched non-streaming {_parse(after['nonstream'])} != {want}")
-        expect(after["stream"] == before["stream"], f"{name}: streaming changed by the patch")
-        expect(not after["stream"]["errors"], f"{name}: streaming errors {after['stream']['errors']}")
-        for key in ("reasoning_tokens", "text") + (("finish",) if kind == "clean" else ()):
+        for step, got in {"3": after["stream"], **after["streams"]}.items():
+            expect(_stream(got) == want, f"{name}: patched streaming (deltas of {step}) {_stream(got)} != {want}")
+            expect(not got["errors"], f"{name}: streaming errors (deltas of {step}) {got['errors']}")
+            if not dsml:
+                old = before["stream"] if step == "3" else before["streams"][step]
+                expect(got == old, f"{name}: streaming (deltas of {step}) changed by the patch")
+            elif step != "1":  # 1-token deltas: the image's own count differs where a byte token has no text
+                expect(got["reasoning_tokens"] == count, f"{name}: streamed reasoning tokens {got['reasoning_tokens']} != {count}")
+        expect(
+            after["nonstream"]["reasoning_tokens"] == count,
+            f"{name}: non-streaming reasoning tokens {after['nonstream']['reasoning_tokens']} != {count}",
+        )
+        for key in ("text",) + (("reasoning_tokens",) if not dsml else ()) + (("finish",) if kind == "clean" else ()):
             expect(after["nonstream"][key] == before["nonstream"][key], f"{name}: {key} changed by the patch")
         expect(
             after["nonstream"]["finish"] == ("tool_calls" if want["calls"] else case.get("finish", "stop")),
@@ -613,11 +780,15 @@ def check(stock: dict, patched: dict) -> list[str]:
         else:
             expect(_parse(before["nonstream"]) != want, f"{name}: stock already parses this correctly (not a red case)")
             expect(after["nonstream"].get("split"), f"{name}: the split did not engage")
-        if kind == "gap2":
-            # Streaming still matches DSML markup by text (documented, not fixed here).
-            expect(before["stream"]["calls"] != want["calls"], f"{name}: streaming no longer opens a call on quoted DSML")
+        if dsml:
+            # Stock streaming matches DSML markup by text.
+            expect(_stream(before["stream"]) != want, f"{name}: stock streaming already parses this correctly (not a red case)")
         else:
-            expect(_stream(before["stream"]) == want, f"{name}: streaming {_stream(before['stream'])} != {want}")
+            expect(_stream(before["stream"]) == want, f"{name}: stock streaming {_stream(before['stream'])} != {want}")
+    expect(
+        stock["cases"]["dsml_quote_in_reasoning"]["nonstream"]["reasoning_tokens"] != patched["cases"]["dsml_quote_in_reasoning"]["nonstream"]["reasoning_tokens"],
+        "dsml_quote_in_reasoning: the stock non-streaming count is already right (not a red case)",
+    )
 
     for name in ("live_on", "dsml_quote", "tool_off"):
         got = patched["extras"][f"responses/{name}"]
@@ -639,6 +810,19 @@ def check(stock: dict, patched: dict) -> list[str]:
     expect(not extras["legacy_split"], "a non-engine parser was split")
     long = extras["long"]
     expect(long["masked"] == 300 and long["ms"] < 250, f"long completion: {long}")
+    if "stream_long" not in extras:
+        return problems + ["no streaming split (DelegatingParser._ots_parse_delta missing)"]
+    real = [["get_weather", '{"city": "Brest"}']]
+    for label in ("stream_misaligned", "stream_literal_hide"):
+        got = extras[label]
+        expect(got["same_as_stock"], f"{label}: not the stock stream")
+        expect(len(got["logged"]) == 1, f"{label}: logged {got['logged']}")
+    for label in ("stream_decode_error", "stream_ids_ahead"):
+        got = extras[label]
+        expect(got["calls"] == real, f"{label}: calls {got['calls']}")
+        expect(len(got["logged"]) == 1, f"{label}: logged {got['logged']}")
+    long = extras["stream_long"]
+    expect(long["overhead_ms"] < 0.05 * long["deltas"], f"long stream: {long}")
     return problems
 
 
@@ -716,10 +900,12 @@ def main() -> int:
     if problems:
         print(f"{len(problems)} problem(s):", *problems[:60], sep="\n  ")
         return 1
-    long = patched["extras"]["long"]
+    long, stream = patched["extras"]["long"], patched["extras"]["stream_long"]
     print(
         f"Output token split on the real serving path OK ({len(patched['cases'])} completions, chat full + stream "
-        f"generators, Responses parse, 3 fail-safes; {long['tokens']}-token completion split in {long['ms']} ms; {ots.name})"
+        f"generators in deltas of {', '.join(map(str, sorted((3,) + STEPS)))}, Responses parse, 7 fail-safes; "
+        f"{long['tokens']}-token completion split in {long['ms']} ms; {stream['tokens']}-token stream "
+        f"({stream['deltas']} deltas) +{stream['overhead_ms']} ms over {stream['stock_ms']} ms; {ots.name})"
     )
     return 0
 
