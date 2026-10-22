@@ -1,0 +1,282 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "EXL3 MoE wedge - how the parts relate",
+    "output": "exl3-moe-wedge.html",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "main-path",
+        "label": "Main path",
+        "focus": [
+          "session",
+          "engine",
+          "moe",
+          "barrier",
+          "freeze"
+        ],
+        "note": "A long continue-prefill reaches the GPU and the fused MoE kernel never finishes."
+      },
+      {
+        "id": "why-it-wedges",
+        "label": "Why it wedges",
+        "focus": [
+          "competitor",
+          "moe",
+          "barrier"
+        ],
+        "note": "The kernel needs every block resident at once; other work on the SMs denies it."
+      },
+      {
+        "id": "detect-and-recover",
+        "label": "Detect and recover",
+        "focus": [
+          "freeze",
+          "watchdog",
+          "recovery"
+        ],
+        "note": "The watchdog separates a recovering spin from a terminal one."
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "session",
+      "type": "external",
+      "label": "Agent session",
+      "sublabel": "~260k tokens",
+      "pos": [
+        40,
+        330
+      ],
+      "size": [
+        150,
+        64
+      ],
+      "tag": "the trigger"
+    },
+    {
+      "id": "engine",
+      "type": "backend",
+      "label": "vLLM engine",
+      "sublabel": "head rank (TP0)",
+      "pos": [
+        390,
+        330
+      ],
+      "size": [
+        150,
+        64
+      ]
+    },
+    {
+      "id": "moe",
+      "type": "backend",
+      "label": "Fused MoE kernel",
+      "sublabel": "exl3_moe",
+      "pos": [
+        740,
+        330
+      ],
+      "size": [
+        170,
+        72
+      ],
+      "tag": "plain launch, not cooperative"
+    },
+    {
+      "id": "competitor",
+      "type": "external",
+      "label": "Other resident work",
+      "sublabel": "attention GEMMs, side streams",
+      "pos": [
+        740,
+        110
+      ],
+      "size": [
+        170,
+        68
+      ]
+    },
+    {
+      "id": "barrier",
+      "type": "database",
+      "label": "Device-global barrier",
+      "sublabel": "one lock buffer per device",
+      "pos": [
+        1110,
+        330
+      ],
+      "size": [
+        165,
+        72
+      ],
+      "tag": "zeroed once per process"
+    },
+    {
+      "id": "freeze",
+      "type": "backend",
+      "label": "Forward progress frozen",
+      "sublabel": "SM ~96%, counters flat",
+      "pos": [
+        1475,
+        330
+      ],
+      "size": [
+        165,
+        72
+      ],
+      "tag": "silent: no error"
+    },
+    {
+      "id": "watchdog",
+      "type": "backend",
+      "label": "vLLM watchdog",
+      "sublabel": "180 s + 600 s grace",
+      "pos": [
+        1475,
+        540
+      ],
+      "size": [
+        165,
+        64
+      ]
+    },
+    {
+      "id": "recovery",
+      "type": "backend",
+      "label": "Release or restart",
+      "sublabel": "self-heal in ~8 min",
+      "pos": [
+        1770,
+        540
+      ],
+      "size": [
+        165,
+        64
+      ]
+    },
+    {
+      "id": "coop",
+      "type": "backend",
+      "label": "Coop overlay",
+      "sublabel": "decode only (rows <= 8)",
+      "pos": [
+        380,
+        110
+      ],
+      "size": [
+        170,
+        68
+      ],
+      "tag": "not used by prefill"
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "GB10 head rank - one GPU, one process",
+      "wraps": [
+        "engine",
+        "moe",
+        "competitor",
+        "barrier",
+        "freeze",
+        "watchdog",
+        "recovery",
+        "coop"
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "session-to-engine",
+      "from": "session",
+      "to": "engine",
+      "label": "continue-prefill",
+      "variant": "emphasis"
+    },
+    {
+      "id": "engine-to-moe",
+      "from": "engine",
+      "to": "moe",
+      "label": "launch fused MoE"
+    },
+    {
+      "id": "moe-to-barrier",
+      "from": "moe",
+      "to": "barrier",
+      "label": "all blocks must be resident"
+    },
+    {
+      "id": "barrier-to-freeze",
+      "from": "barrier",
+      "to": "freeze",
+      "label": "a block never arrives"
+    },
+    {
+      "id": "competitor-to-moe",
+      "from": "competitor",
+      "to": "moe",
+      "label": "SMs already occupied",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelDy": 30
+    },
+    {
+      "id": "freeze-to-watchdog",
+      "from": "freeze",
+      "to": "watchdog",
+      "label": "stall detected",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelDy": 30
+    },
+    {
+      "id": "watchdog-to-recovery",
+      "from": "watchdog",
+      "to": "recovery",
+      "label": "grace-window verdict"
+    },
+    {
+      "id": "coop-to-engine",
+      "from": "coop",
+      "to": "engine",
+      "label": "decode only",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelDy": 30
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "The trigger",
+      "items": [
+        "A ~260k continue-prefill from the agent session",
+        "The script-shaped disturb load did not fire it"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Why it wedges",
+      "items": [
+        "The kernel needs every block resident; a plain launch enforces nothing",
+        "Resident blocks spin on a shared device barrier - no error, no timeout",
+        "Result: SM pinned ~96% while token counters stay flat"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Detect, recover, and what was tested",
+      "items": [
+        "Usually self-releases in ~7-8 min; a permanent spin needs a restart",
+        "The coop overlay covers decode only, so prefill stays on this path",
+        "Arm B (cooperative launch) tested 2026-09-21: still wedged, no fail-fast"
+      ]
+    }
+  ]
+}
