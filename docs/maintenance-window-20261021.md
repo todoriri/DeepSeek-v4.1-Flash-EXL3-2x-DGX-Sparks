@@ -227,6 +227,14 @@ ever needs more margin, the lever is that threshold (e.g. 3.0 GiB), at some pref
   - That is not like for like: the post-window sample is small and its prompt-length mix is
     unchecked. Split it by prompt length before reading anything into it.
 - **Head memory.** Watch the `dsv41-mem` release lines and `MemAvailable` on long sessions.
+  - Baseline after the 2026-10-22 15:38 CEST restart (output-token split): MemAvailable
+    5.90 GiB before warm-up, 4.2 GiB idle a few hours later (`free -m` on gb10); no prefill
+    release has fired yet (no traffic since). The head container's log is `docker logs
+    dsv41-exl3-head` (the kit's `logs/head.log` is from 09-24).
+  - Action rule: a floor below 2.0 GiB, or any OOM / restart, means raising
+    `DSV41_PREFILL_EMPTY_CACHE_MEMAVAIL_GIB` to 3.0 at the next window.
+  - A week of samples needs the 10-min sampler (`~/memsampler/sample.sh`, transient timer,
+    auto-stop) re-armed on gb10: operator decision.
 - **Control-token guard:** done. The served-path fix (`98abfc7`) was tested and deployed on
   2026-10-21 at 23:44 CEST (see the record linked above).
 
