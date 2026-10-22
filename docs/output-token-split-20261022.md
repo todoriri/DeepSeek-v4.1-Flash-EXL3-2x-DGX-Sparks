@@ -4,9 +4,10 @@
 
 - **Non-streaming:** **live on the gb10 kit since 2026-10-22 15:38 CEST** (one restart; record in
   [Deploy record](#deploy-record-2026-10-22)).
-- **Streaming DSML + the non-streaming reasoning-token count:** prepared 2026-10-22, **not
-  deployed** ([Streaming](#streaming-and-the-reasoning-token-count-2026-10-22-prepared)). It is
-  the same file, so deploying it is one file copy and one restart; `start.sh` is unchanged.
+- **Streaming DSML + the non-streaming reasoning-token count:** **live since 2026-10-22 20:34
+  CEST** (one restart; [Deploy record (streaming)](#deploy-record-streaming-extension-2026-10-22);
+  design in [Streaming](#streaming-and-the-reasoning-token-count-2026-10-22)). Same file;
+  `start.sh` unchanged.
 
 `overlay/patch_output_token_split.py` (runtime, both ranks, wired in `start.sh`),
 `tests/test_output_token_split.py`, `scripts/dsml_stream_probe.py` (live check).
@@ -148,7 +149,7 @@ Properties:
 - **Cost:** 3.4 ms for an 18,349-token completion holding 300 quotes, on the rai CPU. One
   `decode_batch` and one trie-regex scan; the regex is built once per tokenizer.
 
-## Streaming and the reasoning-token count (2026-10-22, prepared)
+## Streaming and the reasoning-token count (2026-10-22)
 
 **Why it matters more than the non-streaming fix:** 7,696 of the 7,715 caller requests in
 repl's record since 10-14 are `stream: true` (dsh and Hermes). The deployed non-streaming fix
@@ -340,7 +341,7 @@ DSV41_VLLM_TREE=/tmp/dsv41-vllm DSV41_VLLM_PYTHON=/tmp/dsv41-vllm/venv/bin/pytho
 
 Without the tree it checks only the `start.sh` wiring and prints a skip line.
 
-## Deploy the streaming extension (operator only, not done)
+## Deploy the streaming extension (operator only; done 2026-10-22, record below)
 
 One restart. Only `overlay/patch_output_token_split.py` changes; the kit's `start.sh` already
 runs it on both ranks.
@@ -361,6 +362,33 @@ runs it on both ranks.
      `get_weather {"city": "Paris"}`, both modes;
    - the head log has no `output token split: streaming:` line after the probe.
 6. **Rollback:** copy the `.bak-pre-stream-<stamp>` file back and restart the same way.
+
+## Deploy record: streaming extension (2026-10-22)
+
+One restart, `SKIP_BUILD=1 SKIP_PULL=1 ./start.sh restart`, launched 20:24 CEST, `/health` 200 at
+20:34:11. The engine was idle: 0 running and 0 waiting, and repl's last client request was at
+03:50Z. Raw data: `_repl_measurement_stash/ots-stream-20261022/`.
+
+- **Before the restart, on rai:** `test_output_token_split.py` (21 completions), the guard suites
+  (15 / 4 / 84) and `test_dsml_stream_probe.py` green; `start.sh` unchanged since `c35177c`'s
+  deploy.
+- **Kit changes:** `overlay/patch_output_token_split.py` `95333605…` → `bcefec16…` (backup
+  `overlay/patch_output_token_split.py.bak-pre-stream-20261022-202402`); `start.sh` (`85a22ced…`),
+  the guard (`b1124b1f…`) and `.env` (SWA keep, YOCO compact) untouched.
+- **Logs:** head and worker show `output token split patch: applied` and the guard `applied`; the
+  SWA and YOCO lines are unchanged. `vllm-watchdog` resumed after `/health`. Head MemAvailable
+  4.2 GiB, worker 5.5 GiB at ready.
+- **Verify:**
+  - `tests/test_smoke.sh` → 323.
+  - **`scripts/dsml_stream_probe.py`:** `real-off`, `real-on` and `quote` PASS. At temperature 0
+    the model wrote the **same 59 ids** as in the pre-deploy run (`probe-before.json`): the
+    quote now streams as content, with no tool call, where the stock stream had returned a
+    `get_weather` call.
+  - `dsml_ids.py` (non-streaming real calls): `get_weather {"city": "Paris"}`,
+    `finish_reason: tool_calls`, both modes, 6 × id 128825 each.
+  - The head log has 0 `output token split:` fallback lines and 0 tracebacks.
+- **Rollback (unused):** copy the `.bak-pre-stream-20261022-202402` file back over
+  `overlay/patch_output_token_split.py`, then `SKIP_BUILD=1 SKIP_PULL=1 ./start.sh restart`.
 
 ## Deploy (operator only)
 

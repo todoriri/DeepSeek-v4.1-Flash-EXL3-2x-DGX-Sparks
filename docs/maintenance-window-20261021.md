@@ -253,10 +253,10 @@ The repl index is `docs/PROGRESS.md` 2026-10-22 (repl `d0d0823`).
 - **Open:**
   - the organic own-output reuse verdict for dsh (above; the Hermes part is explained);
   - head memory.
-- **Prepared for the next window (one file, one restart):** the streaming DSML fix and the
-  non-streaming reasoning-token count
-  ([output-token-split-20261022.md](output-token-split-20261022.md) §Streaming). A live probe
-  showed the stock stream turning a quoted DSML block into a tool call. The documented `rfind`
+- **Done 2026-10-22 20:34 CEST (one restart):** the streaming DSML fix and the non-streaming
+  reasoning-token count ([output-token-split-20261022.md](output-token-split-20261022.md)
+  §Streaming, deploy record). A live probe showed the stock stream turning a quoted DSML block
+  into a tool call; after the restart the same 59 ids stream as content. The documented `rfind`
   concern about the count did not hold; the real count bug was a DSML quote in the reasoning.
 - **Optional:** the AIME 32-sample protocol, to separate 99.9 % from ~95 %
   ([deepinfer-bench-protocol.md](deepinfer-bench-protocol.md) §8).
