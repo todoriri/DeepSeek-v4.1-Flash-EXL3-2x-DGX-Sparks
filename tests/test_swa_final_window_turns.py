@@ -6,7 +6,10 @@
     does in tests/test_swa_final_window_sim.py (4,639 YOCO off, 4,821 YOCO compact);
   * chaining: internal origins, other sessions/upstreams, errors and other paths are
     left out; a rewritten history and an unknown cached count are counted, not guessed;
-  * decode / prefill rates; the DB is opened read-only; a missing DB exits 2.
+  * decode / prefill rates; the DB is opened read-only; a missing DB exits 2;
+  * history (2026-10-22): a turn whose next request drops the previous output's reasoning
+    (repl request_bodies) is "dropped", not reusable; "echoed" / "no_reasoning" are; no
+    body, an unreadable one or no assistant message is "unknown"; totals per agent_mode.
 """
 from __future__ import annotations
 
@@ -17,6 +20,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import zlib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -58,6 +62,26 @@ def _db(rows) -> Path:
     con.commit()
     con.close()
     return path
+
+
+def _bodies(db: Path, bodies: dict) -> None:
+    """repl's request_bodies table: (id, zlib JSON) or raw bytes for a broken one."""
+    con = sqlite3.connect(db)
+    con.execute("CREATE TABLE request_bodies (seq INTEGER, id TEXT, encoding TEXT, size INTEGER, sha256 TEXT, body BLOB)")
+    for seq, (rid, body) in enumerate(bodies.items()):
+        blob = body if isinstance(body, bytes) else zlib.compress(json.dumps(body).encode())
+        con.execute("INSERT INTO request_bodies VALUES (?, ?, 'zlib', ?, '', ?)", (seq, rid, len(blob), blob))
+    con.commit()
+    con.close()
+
+
+def _history(reasoning: str | None, field: str = "reasoning_content") -> dict:
+    """A chat body whose last assistant message (the previous output) has this reasoning."""
+    assistant = {"role": "assistant", "content": "ok", "tool_calls": []}
+    if reasoning is not None:
+        assistant[field] = reasoning
+    return {"model": "m", "messages": [{"role": "user", "content": "go"}, assistant,
+                                        {"role": "tool", "content": "result"}]}
 
 
 def _session_rows():
@@ -110,6 +134,47 @@ def test_chaining_rules():
     assert s["with_full_previous_output"] == 3
     only = W.summarize([r for r in rows if r["session_id"] == SID], "/v1/chat/completions", 140)
     assert only["continuations"] == 5
+
+
+def test_history_classes():
+    # (P, O, R, cached) per request; every next prompt holds the whole previous output.
+    turns = [(1000, 400, 300, 0), (1500, 200, 0, 1024), (1800, 300, 250, 1664), (2200, 100, 50, 1792),
+             (2400, 90, 60, 2176), (2600, 80, 40, 2560), (2800, 70, 30, 2560), (3000, 10, 0, 2816)]
+    rows = [_row(i, prompt_tokens=P, output_tokens=O, reasoning_tokens=R, cached_tokens=c, agent_mode="")
+            for i, (P, O, R, c) in enumerate(turns)]
+    rows += [_row(20 + i, session_id="dsh", agent_mode="coding", prompt_tokens=P, output_tokens=O,
+                  reasoning_tokens=R, cached_tokens=c) for i, (P, O, R, c) in enumerate(turns[:2])]
+    db = _db(rows)
+    _bodies(db, {
+        "r1": _history("thought"),                # r0's reasoning echoed
+        "r2": _history(None),                     # r1 had none: no_reasoning, body irrelevant
+        "r3": _history(None),                     # r2's reasoning dropped
+        # r4: no body                             -> unknown
+        "r5": b"not zlib",                        # unreadable -> unknown
+        "r6": {"model": "m", "messages": [{"role": "user", "content": "x"}]},  # no assistant -> unknown
+        "r7": _history("thought", "reasoning"),   # r6's reasoning echoed under "reasoning"
+        "r21": _history(None),                    # dsh: r20's reasoning dropped
+    })
+    s = json.loads(_run("--db", str(db), "--json", "--per-turn").stdout)
+    got = {t["upstream_request_id"]: t["history"] for t in s["turns"]}
+    assert got == {"chatcmpl-1": "echoed", "chatcmpl-2": "no_reasoning", "chatcmpl-3": "dropped",
+                   "chatcmpl-4": "unknown", "chatcmpl-5": "unknown", "chatcmpl-6": "unknown",
+                   "chatcmpl-7": "echoed", "chatcmpl-21": "dropped"}, got
+    h = s["by_history"]
+    assert {k: v["turns"] for k, v in h.items()} == {"no_reasoning": 1, "echoed": 2, "dropped": 2, "unknown": 3}
+    assert h["dropped"]["own_output_tokens"] == 300 + 400
+    assert h["dropped"]["own_output_in_next_prompt"] == (300 - 250) + (400 - 300)
+    assert s["reusable"]["turns"] == 3
+    assert s["reusable"]["own_output_tokens"] == 400 + 200 + 70
+    assert s["reusable"]["reprefilled_own_tokens"] == sum(
+        W.reprefilled_own(P, O, turns[i + 1][3]) for i, (P, O, _, _) in enumerate(turns) if i in (0, 1, 6))
+    assert sum(v["turns"] for v in h.values()) == s["with_full_previous_output"] == 8
+    assert s["by_agent_mode"]["coding"]["turns"] == 1 and s["by_agent_mode"]["-"]["turns"] == 7
+    # Without a request_bodies table every reasoning turn is unknown; R = 0 is still no_reasoning.
+    plain = W.summarize(rows, "/v1/chat/completions", 140)
+    assert {k: v["turns"] for k, v in plain["by_history"].items()} == {
+        "no_reasoning": 1, "echoed": 0, "dropped": 0, "unknown": 7}
+    assert W.history({"reasoning_tokens": None}, {"history_reasoning": True}) == "unknown"
 
 
 def test_missing_db_and_args():

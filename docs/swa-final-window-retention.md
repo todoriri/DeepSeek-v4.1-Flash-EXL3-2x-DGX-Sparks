@@ -1,9 +1,14 @@
-# Final sliding-window retention (a): prepared, OFF by default. Encoder SWA bounded replay (b): designed, not implemented
+# Final sliding-window retention (a): live since 2026-10-21, OFF by default. Encoder SWA bounded replay (b): designed, not implemented
 
-**Status 2026-10-21.**
+**Status (updated 2026-10-22).**
 
 - **(a)** Port of DeepInfer's decode-time SWA store, as `DSV41_SWA_FINAL_WINDOW=keep`. It is
-  prepared: the overlay, launcher wiring and CPU tests are in this repo. It is exact.
+  exact. **Live on the gb10 kit since the 2026-10-21 maintenance window** (with YOCO compact;
+  [maintenance-window-20261021.md](maintenance-window-20261021.md)). Organic check 2026-10-22:
+  on the turns whose next prompt holds the previous output token for token, the re-prefill
+  equals the prediction (1,735 = 1,735 tokens, 20 turns). Turns from a client that drops
+  `reasoning_content` (Hermes as configured) cannot be reused by any cache (same doc,
+  §Follow-ups). The section below is the original design record.
 - **(b)** Encoder SWA bounded replay. It is approximate. Its design and the reasons to defer
   it are in §7.
 
@@ -308,7 +313,7 @@ are the inputs.
 | `overlay/patch_swa_final_window.py` | 3 anchors in 2 image files (`v1/core/single_type_kv_cache_manager.py`: the hold in `SlidingWindowManager.__init__`; `v1/core/kv_cache_manager.py`: the hook in `free` and `pop_blocks_for_free`) plus footers. Applies all or nothing, is idempotent, fails loudly (exit 1, nothing written) on drift, `--check` only verifies. The patched files refuse to import unless `DSV41_SWA_FINAL_WINDOW=keep` |
 | `start.sh` | `DSV41_SWA_FINAL_WINDOW=off\|keep` (default off): validated, passed to both containers. The patch is mounted on both ranks and run before YOCO only when not off; the container exits if it fails |
 | `Dockerfile` | copies the patch and runs `--check` against the image's vLLM |
-| `scripts/swa_final_window_turns.py` | per-turn own-output re-prefill, hit position and predictions from the repl record (read-only) |
+| `scripts/swa_final_window_turns.py` | per-turn own-output re-prefill, hit position and predictions from the repl record (read-only); since 2026-10-22 also whether the next request carried the previous reasoning (`by_history`, from repl's request bodies) and totals per client (`by_agent_mode`) |
 
 Tests (CPU, `python3 tests/<file>`). All were red before the overlay existed.
 

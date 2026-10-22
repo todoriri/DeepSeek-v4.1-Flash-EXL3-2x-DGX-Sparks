@@ -13,6 +13,19 @@ n+1's prompt and H = its cached tokens:
                   [0, O]. Counted only when growth >= 0 and H is known.
   hit vs end      H - T (0 = resumed at the previous end; stock: about -(O + 59)).
   hit vs prompt   H - P (stock: -127..0 at the prompt tail, or a 4096 multiple inside O).
+  history         whether the next prompt can hold the previous output token for token
+                  (2026-10-22: growth >= 0 alone does not show it).  The served template
+                  renders every earlier assistant turn's reasoning when tools are declared,
+                  so a client that drops reasoning_content (Hermes as configured on rai)
+                  diverges from the generated ids at the first output token:
+                    no_reasoning  the previous output had no reasoning tokens;
+                    echoed        its reasoning is in the next request's last assistant
+                                  message (repl request_bodies);
+                    dropped       it is not: own-output reuse is impossible by construction,
+                                  and only O - R of it (content + calls) is in the prompt;
+                    unknown       reasoning tokens unknown or no body recorded.
+                  The verdict on DSV41_SWA_FINAL_WINDOW=keep belongs to no_reasoning + echoed
+                  (summed as "reusable"); totals over all turns stay as before.
   predicted       the hit under keep, from lengths alone, assuming a normal finish
                   (C = T - 1 computed tokens):
                     off      B_end = align128(floor64(C) - 64), when B_end + 64 <= N - 1;
@@ -21,7 +34,7 @@ n+1's prompt and H = its cached tokens:
                              a 4096 checkpoint can sit above B_yoco.
                   The predicted value is max(observed, that). It does not model eviction.
 
-Also printed per window: decode tok/s (output / (total - ttft), rows with >= 64 output
+Totals are also split by client (agent_mode; dsh sends "coding").  Also printed per window: decode tok/s (output / (total - ttft), rows with >= 64 output
 tokens and >= 1 s of decode) and prefill tok/s ((prompt - cached) / ttft, rows with >= 2048 uncached tokens).
 Use them to check that decode is unchanged. The record holds no memory figure: head
 MemAvailable comes from the head log / free -m (docs/swa-final-window-retention.md).
@@ -43,6 +56,7 @@ import os
 import sqlite3
 import statistics
 import sys
+import zlib
 from typing import Any, Iterable
 
 BS, ALIGN, PEEK = 64, 128, 64
@@ -50,7 +64,9 @@ INTERNAL_ORIGINS = {"keepalive", "probe", "replay"}          # repl record_store
 CACHED_NATIVE_SINCE = "2026-09-23T15:34:00.000Z"             # repl record_store.cached_known
 COLUMNS = ("id", "started_at", "session_id", "upstream", "call_origin", "status_code", "path",
            "prompt_tokens", "output_tokens", "cached_tokens", "cached_source", "ttft_ms",
-           "total_ms", "upstream_request_id")
+           "total_ms", "upstream_request_id", "agent_mode", "reasoning_tokens")
+HISTORY = ("no_reasoning", "echoed", "dropped", "unknown")
+REUSABLE = ("no_reasoning", "echoed")
 
 
 def cached_known(row: dict[str, Any]) -> int | None:
@@ -63,6 +79,28 @@ def cached_known(row: dict[str, Any]) -> int | None:
     if ct > 0:
         return ct
     return ct if str(row.get("started_at") or "") >= CACHED_NATIVE_SINCE else None
+
+
+def history_reasoning(body: dict[str, Any] | None) -> bool | None:
+    """Does the request's last assistant message carry reasoning? (None: no such message)."""
+    messages = (body or {}).get("messages")
+    if not isinstance(messages, list):
+        return None
+    for message in reversed(messages):
+        if isinstance(message, dict) and message.get("role") == "assistant":
+            return bool(message.get("reasoning_content") or message.get("reasoning"))
+    return None
+
+
+def history(prev: dict[str, Any], cur: dict[str, Any]) -> str:
+    """How the next request carries the previous output's reasoning (see HISTORY)."""
+    reasoning = prev.get("reasoning_tokens")
+    if reasoning is None:
+        return "unknown"
+    if int(reasoning) == 0:
+        return "no_reasoning"
+    carried = cur.get("history_reasoning")
+    return "unknown" if carried is None else ("echoed" if carried else "dropped")
 
 
 def b_end(computed: int) -> int:
@@ -105,7 +143,9 @@ def turns(rows: Iterable[dict[str, Any]], path: str, keep: int) -> list[dict[str
             N, H = int(cur["prompt_tokens"]), cached_known(cur)
             t = {"session_id": sid, "upstream": upstream, "started_at": cur["started_at"],
                  "upstream_request_id": cur.get("upstream_request_id"), "prompt": P,
-                 "output": O, "next_prompt": N, "growth": N - P - O, "hit": H}
+                 "output": O, "next_prompt": N, "growth": N - P - O, "hit": H,
+                 "agent_mode": cur.get("agent_mode") or "", "reasoning": prev.get("reasoning_tokens"),
+                 "history": history(prev, cur)}
             if H is not None and N >= P + O:
                 t.update(hit_vs_end=H - P - O, hit_vs_prompt=H - P,
                          reprefilled_own=reprefilled_own(P, O, H),
@@ -122,9 +162,24 @@ def _dist(values: list[int]) -> dict[str, Any] | None:
             "max": max(values)}
 
 
+def _totals(full: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "turns": len(full),
+        "own_output_tokens": sum(t["output"] for t in full),
+        "reprefilled_own_tokens": sum(t["reprefilled_own"] for t in full),
+        "predicted_keep_off_tokens": sum(t["predicted_off"] for t in full),
+        "predicted_keep_compact_tokens": sum(t["predicted_compact"] for t in full),
+        "hit_vs_end": _dist([t["hit_vs_end"] for t in full]),
+    }
+
+
 def summarize(rows: list[dict[str, Any]], path: str, keep: int) -> dict[str, Any]:
     ts = turns(rows, path, keep)
     full = [t for t in ts if "reprefilled_own" in t]
+    by_history = {name: _totals([t for t in full if t["history"] == name]) for name in HISTORY}
+    dropped = [t for t in full if t["history"] == "dropped"]
+    by_history["dropped"]["own_output_in_next_prompt"] = sum(
+        max(0, t["output"] - int(t["reasoning"])) for t in dropped)
     decode = [int(r["output_tokens"]) / ((int(r["total_ms"]) - int(r["ttft_ms"])) / 1000)
               for r in rows if int(r.get("output_tokens") or 0) >= 64
               and int(r.get("total_ms") or 0) - int(r.get("ttft_ms") or 0) >= 1000
@@ -149,6 +204,10 @@ def summarize(rows: list[dict[str, Any]], path: str, keep: int) -> dict[str, Any
         "hit_vs_prompt": _dist([t["hit_vs_prompt"] for t in full]),
         "hit_at_prompt_tail": sum(1 for t in full if -127 <= t["hit_vs_prompt"] <= 0),
         "hit_inside_output": sum(1 for t in full if 0 < t["hit_vs_prompt"] <= t["output"]),
+        "reusable": _totals([t for t in full if t["history"] in REUSABLE]),
+        "by_history": by_history,
+        "by_agent_mode": {mode or "-": _totals([t for t in full if t["agent_mode"] == mode])
+                          for mode in sorted({t["agent_mode"] for t in full})},
         "decode_tok_s": _dist([round(x, 1) for x in decode]),
         "prefill_tok_s": _dist([round(x, 1) for x in prefill]),
         "keep": keep,
@@ -203,8 +262,28 @@ def load_rows(db: str, since: str | None, until: str | None, sessions: list[str]
         sql += " AND upstream = ?"
         args.append(upstream)
     rows = [dict(r) for r in con.execute(sql + " ORDER BY started_at", args)]
+    tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    if "request_bodies" in tables:
+        by_id = {r["id"]: r for r in rows}
+        ids = list(by_id)
+        for i in range(0, len(ids), 500):
+            chunk = ids[i:i + 500]
+            for rid, encoding, body in con.execute(
+                    f"SELECT id, encoding, body FROM request_bodies WHERE id IN ({', '.join('?' * len(chunk))})",
+                    chunk):
+                by_id[rid]["history_reasoning"] = history_reasoning(_body(encoding, body))
     con.close()
     return rows
+
+
+def _body(encoding: str | None, body: bytes | str | None) -> dict[str, Any] | None:
+    """A recorded request body (repl stores zlib JSON), or None if unreadable."""
+    try:
+        raw = zlib.decompress(body) if encoding == "zlib" else body
+        parsed = json.loads(raw)
+    except (TypeError, ValueError, zlib.error):
+        return None
+    return parsed if isinstance(parsed, dict) else None
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -234,14 +313,19 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(s, indent=1))
         return 0
     for k, v in s.items():
-        if k != "turns":
+        if k in ("by_history", "by_agent_mode"):
+            for name, totals in v.items():
+                print(f"{k + '.' + name:32} {totals}")
+        elif k != "turns":
             print(f"{k:32} {v}")
     if args.per_turn:
-        print("\nstarted_at\tupstream_request_id\tP\tO\tN\thit\thit-T\treprefilled_own\tpred_off\tpred_compact")
+        print("\nstarted_at\tupstream_request_id\tagent_mode\thistory\tP\tO\tR\tN\thit\thit-T"
+              "\treprefilled_own\tpred_off\tpred_compact")
         for t in s["turns"]:
             print("\t".join(str(t.get(k, "")) for k in (
-                "started_at", "upstream_request_id", "prompt", "output", "next_prompt", "hit",
-                "hit_vs_end", "reprefilled_own", "predicted_off", "predicted_compact")))
+                "started_at", "upstream_request_id", "agent_mode", "history", "prompt", "output",
+                "reasoning", "next_prompt", "hit", "hit_vs_end", "reprefilled_own", "predicted_off",
+                "predicted_compact")))
     return 0
 
 

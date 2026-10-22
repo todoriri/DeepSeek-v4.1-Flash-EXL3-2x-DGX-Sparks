@@ -184,8 +184,26 @@ ever needs more margin, the lever is that threshold (e.g. 3.0 GiB), at some pref
 
 ## Follow-ups
 
-- **Organic own-output reuse — measured 2026-10-22: NOT the predicted saving (open).**
-  `scripts/swa_final_window_turns.py`, read-only on repl's record:
+- **Organic own-output reuse — explained 2026-10-22: keep works; the shortfall was the client.**
+  Re-run with the reasoning-aware script (history classes, request bodies, per-client totals):
+  - Post-window, all 55 turns came from Hermes Agent (4 sessions); dsh sent no traffic.
+  - **35 turns are `dropped`:** Hermes sends earlier assistant messages back without
+    `reasoning_content` (0 of 2,306 in the captured bodies; `~/.hermes/config.yaml` does not
+    set `model.reasoning_echo`). With tools declared the encoder renders every earlier turn's
+    reasoning, so the next prompt diverges from the generated ids at the first output token.
+    17,579 of the 20,355 own-output tokens; reuse is impossible by construction, and only
+    O − R of them (content + calls) are in the next prompt at all.
+  - **The 20 reusable turns** (no reasoning) re-prefilled **1,735 tokens = the prediction
+    under keep + compact (1,735)**; hit vs end median −136 (stock: −(O + 59)). Their outputs
+    are short (139 tokens on average), so the 64–191-token B_end residue and YOCO's cap are
+    most of what is left.
+  - Pre-window, the dsh turns (`agent_mode` coding) are `unknown`: request bodies are only
+    recorded since 2026-10-22 00:22Z. dsh echoes reasoning (repl PROGRESS 10-19 #5), so its
+    organic verdict waits for the next dsh window.
+  - Hermes reuse needs `reasoning_echo: true` under `model:` in `~/.hermes/config.yaml`:
+    operator decision (longer prompts against prefill saved).
+
+  The first measurement (length-only), kept for the record:
   - From the final restart (10-21 21:44Z) to the 10-22 restart: 95 continuations, 55 of which
     hold the whole previous output. 19,314 of 20,355 own-output tokens were re-prefilled (95 %).
     The length-only prediction under keep + compact is 6,188.
@@ -220,7 +238,7 @@ The repl index is `docs/PROGRESS.md` 2026-10-22 (repl `d0d0823`).
   - `tests/test_smoke.sh` reads the served id from `/v1/models` when none is given;
   - pushed to `origin/main`.
 - **Open:**
-  - the organic own-output reuse shortfall (above);
+  - the organic own-output reuse verdict for dsh (above; the Hermes part is explained);
   - the > 32K decode split (above);
   - head memory.
 - **Prepared for the next window (one file, one restart):** the streaming DSML fix and the
